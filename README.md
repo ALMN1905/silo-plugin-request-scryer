@@ -20,6 +20,8 @@ Silo also completes a request on its own once the title reaches its library.
 
 Series are requested whole; Scryer's monitoring decides which seasons it fetches. Anime series go to Scryer's anime library.
 
+Scryer has no anime movie catalog, so anime movies go to the default movie library unless you pick another one: in the server's settings, choose **Anime movies library** from the list of Scryer movie libraries. If the API key cannot read libraries and the list is empty, type the exact library name in **Anime movies library (manual name)** instead. The name is matched ignoring case; if no library has it, the request fails with that reason rather than landing in the default library.
+
 ## Setup
 
 1. In Scryer, create an API key under your profile's **API keys**.

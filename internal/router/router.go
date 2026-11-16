@@ -78,8 +78,25 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 
-	titleID, err := client.AddTitle(ctx, addTitleInput(req.GetRequest()))
+	input := addTitleInput(req.GetRequest())
 	var gqlErr *scryer.GraphQLError
+	if name := animeMovieLibrary(conn); name != "" && isAnimeMovie(req.GetRequest()) {
+		id, err := client.LibraryID(ctx, "MOVIE", name)
+		switch {
+		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrLibraryNotFound):
+			// Falling back to the default library would put the title in the
+			// wrong place, so the target fails with the reason instead.
+			for _, q := range qualities {
+				resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Scryer library for anime movies: "+err.Error()))
+			}
+			return resp, nil
+		case err != nil:
+			return nil, err
+		}
+		input.LibraryID = &id
+	}
+
+	titleID, err := client.AddTitle(ctx, input)
 	switch {
 	case errors.As(err, &gqlErr):
 		for _, q := range qualities {
@@ -99,6 +116,30 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		resp.Targets = append(resp.Targets, target(q, titleID, statusQueued, message))
 	}
 	return resp, nil
+}
+
+// Connection config keys for the anime movies library. The first is a
+// dropdown filled from Scryer; the second is a free-text fallback for when the
+// API key cannot read libraries. The dropdown wins when both are set.
+const (
+	configAnimeMoviesLibrary       = "anime_movies_library"
+	configAnimeMoviesLibraryManual = "anime_movies_library_manual"
+)
+
+func isAnimeMovie(d *pluginv1.RequestDescriptor) bool {
+	return d.GetMediaType() == "movie" && d.GetIsAnime()
+}
+
+// animeMovieLibrary returns the configured library name for anime movies, or ""
+// when none is set (anime movies then go to Scryer's default movie library).
+func animeMovieLibrary(conn *pluginv1.RouterConnection) string {
+	cfg := conn.GetConfig().GetFields()
+	for _, key := range []string{configAnimeMoviesLibrary, configAnimeMoviesLibraryManual} {
+		if v := strings.TrimSpace(cfg[key].GetStringValue()); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func addTitleInput(d *pluginv1.RequestDescriptor) scryer.AddTitle {
@@ -264,12 +305,39 @@ func (r *Router) TestConnection(ctx context.Context, req *pluginv1.TestConnectio
 	}
 }
 
-// ListConfigOptions has nothing to offer: the server needs only its URL and key.
-func (r *Router) ListConfigOptions(context.Context, *pluginv1.ListConfigOptionsRequest) (*pluginv1.ListConfigOptionsResponse, error) {
-	return &pluginv1.ListConfigOptionsResponse{}, nil
+// ListConfigOptions offers Scryer's movie libraries for the anime movies
+// dropdown. When Scryer cannot be read (bad key, no permission, unreachable)
+// it offers nothing, and the admin falls back to the manual text field.
+func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfigOptionsRequest) (*pluginv1.ListConfigOptionsResponse, error) {
+	resp := &pluginv1.ListConfigOptionsResponse{}
+	libs, err := r.newClient(req.GetConnection()).Libraries(ctx, "MOVIE")
+	if err != nil {
+		return resp, nil
+	}
+	list := &pluginv1.ConfigOptionList{}
+	for _, l := range libs {
+		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.Name, Label: l.Name})
+	}
+	resp.OptionsByField = map[string]*pluginv1.ConfigOptionList{configAnimeMoviesLibrary: list}
+	return resp, nil
 }
 
-// Validate accepts every server: there are no settings to check.
-func (r *Router) Validate(context.Context, *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
-	return &pluginv1.ValidateResponse{}, nil
+// Validate checks that the anime movies library exists in Scryer. When
+// Scryer cannot be read it accepts the name as typed: the check is only a
+// convenience, and Fulfill reports a missing library on the request.
+func (r *Router) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
+	resp := &pluginv1.ValidateResponse{}
+	conn := req.GetConnection()
+	name := animeMovieLibrary(conn)
+	if name == "" {
+		return resp, nil
+	}
+	field := configAnimeMoviesLibrary
+	if strings.TrimSpace(conn.GetConfig().GetFields()[configAnimeMoviesLibrary].GetStringValue()) == "" {
+		field = configAnimeMoviesLibraryManual
+	}
+	if _, err := r.newClient(conn).LibraryID(ctx, "MOVIE", name); errors.Is(err, scryer.ErrLibraryNotFound) {
+		resp.FieldErrors = map[string]string{field: err.Error()}
+	}
+	return resp, nil
 }
