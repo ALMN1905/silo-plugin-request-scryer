@@ -219,31 +219,20 @@ func fulfill(t *testing.T, r *Router, conn *pluginv1.RouterConnection, d *plugin
 	})
 }
 
-func TestAnimeMovieGoesToConfiguredLibrary(t *testing.T) {
-	libs := []map[string]any{{"id": "lib-movies", "name": "Movies"}, {"id": "lib-anime", "name": "Anime Movies"}}
-	for _, tc := range []struct {
-		name string
-		cfg  map[string]any
-	}{
-		{"dropdown", map[string]any{configAnimeMoviesLibrary: "Anime Movies"}},
-		{"manual, case-insensitive", map[string]any{configAnimeMoviesLibraryManual: " anime movies "}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := &fakeScryer{libs: libs}
-			r, conn := newTestRouter(t, fake)
-			withConfig(t, conn, tc.cfg)
-			if _, err := fulfill(t, r, conn, animeMovie()); err != nil {
-				t.Fatal(err)
-			}
-			if fake.added["facet"] != "MOVIE" || fake.added["libraryId"] != "lib-anime" {
-				t.Fatalf("addTitle input = %v", fake.added)
-			}
-		})
+func TestAnimeMovieGoesToTheChosenLibrary(t *testing.T) {
+	fake := &fakeScryer{libs: []map[string]any{{"id": "lib-movies", "name": "Movies"}, {"id": "lib-anime", "name": "Anime Movies"}}}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "lib-anime"})
+	if _, err := fulfill(t, r, conn, animeMovie()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.added["facet"] != "MOVIE" || fake.added["libraryId"] != "lib-anime" {
+		t.Fatalf("addTitle input = %v", fake.added)
 	}
 }
 
 func TestLibraryOnlyAppliesToAnimeMovies(t *testing.T) {
-	cfg := map[string]any{configAnimeMoviesLibrary: "Anime Movies"}
+	cfg := map[string]any{configAnimeMoviesLibrary: "lib-anime"}
 	for name, d := range map[string]*pluginv1.RequestDescriptor{
 		"plain movie":  {MediaType: "movie", Title: "Alien", ExternalIds: map[string]string{"tmdb": "348"}},
 		"anime series": {MediaType: "series", Title: "Sailor Moon", IsAnime: true},
@@ -273,17 +262,28 @@ func TestAnimeMovieWithoutConfigUsesDefaultLibrary(t *testing.T) {
 	}
 }
 
-func TestAnimeMovieFailsWhenLibraryIsMissing(t *testing.T) {
-	fake := &fakeScryer{libs: []map[string]any{{"id": "lib-movies", "name": "Movies"}}}
-	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configAnimeMoviesLibraryManual: "Anime Movies"})
-	resp, err := fulfill(t, r, conn, animeMovie())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := resp.GetTargets()
-	if len(got) != 1 || got[0].GetStatus() != statusFailed || fake.added != nil {
-		t.Fatalf("targets = %v, added = %v", got, fake.added)
+// A deleted library, or a Scryer that refuses to list libraries, must not stop
+// the request: the title goes to the default movie library.
+func TestAnimeMovieFallsBackToTheDefaultLibrary(t *testing.T) {
+	for name, fake := range map[string]*fakeScryer{
+		"library gone":      {libs: []map[string]any{{"id": "lib-movies", "name": "Movies"}}},
+		"libraries refused": {libsErr: "permission denied"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "lib-anime"})
+			resp, err := fulfill(t, r, conn, animeMovie())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := resp.GetTargets()
+			if len(got) != 1 || got[0].GetStatus() != statusQueued || !strings.Contains(got[0].GetMessage(), "default movie library") {
+				t.Fatalf("targets = %v", got)
+			}
+			if _, ok := fake.added["libraryId"]; ok {
+				t.Fatalf("libraryId sent for a library that could not be used: %v", fake.added)
+			}
+		})
 	}
 }
 
@@ -297,7 +297,7 @@ func TestListConfigOptionsOffersMovieLibraries(t *testing.T) {
 	opts := resp.GetOptionsByField()[configAnimeMoviesLibrary].GetOptions()
 	// Silo fills an empty dynamic choice with the first option, so "none"
 	// comes first and the field can stay unset.
-	if len(opts) != 3 || opts[0].GetValue() != "" || opts[2].GetValue() != "Anime Movies" {
+	if len(opts) != 3 || opts[0].GetValue() != "" || opts[2].GetValue() != "b" || opts[2].GetLabel() != "Anime Movies" {
 		t.Fatalf("options = %v", opts)
 	}
 	// Only libraries the key can add titles to are offered.
@@ -310,24 +310,6 @@ func TestListConfigOptionsIsEmptyWhenLibrariesCannotBeRead(t *testing.T) {
 	r, conn := newTestRouter(t, &fakeScryer{libsErr: "permission denied"})
 	resp, err := r.ListConfigOptions(context.Background(), &pluginv1.ListConfigOptionsRequest{Connection: conn})
 	if err != nil || len(resp.GetOptionsByField()) != 0 {
-		t.Fatalf("resp = %v, err = %v", resp, err)
-	}
-}
-
-func TestValidateFlagsAnUnknownLibrary(t *testing.T) {
-	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Movies"}}})
-	withConfig(t, conn, map[string]any{configAnimeMoviesLibraryManual: "Anime Movies"})
-	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
-	if err != nil || resp.GetFieldErrors()[configAnimeMoviesLibraryManual] == "" {
-		t.Fatalf("resp = %v, err = %v", resp, err)
-	}
-}
-
-func TestValidateAcceptsTheNameWhenLibrariesCannotBeRead(t *testing.T) {
-	r, conn := newTestRouter(t, &fakeScryer{libsErr: "permission denied"})
-	withConfig(t, conn, map[string]any{configAnimeMoviesLibraryManual: "Anime Movies"})
-	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
-	if err != nil || len(resp.GetFieldErrors()) != 0 {
 		t.Fatalf("resp = %v, err = %v", resp, err)
 	}
 }
@@ -401,26 +383,6 @@ func TestMoviesSendNoMonitorOptions(t *testing.T) {
 	}
 }
 
-func TestValidateChecksTheLibraryChosenInTheList(t *testing.T) {
-	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Movies"}}})
-	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Gone"})
-	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
-	if err != nil || resp.GetFieldErrors()[configAnimeMoviesLibrary] == "" {
-		t.Fatalf("resp = %v, err = %v", resp, err)
-	}
-}
-
-func TestValidateRefusesATypedNameTheListOverrides(t *testing.T) {
-	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Anime Movies"}}})
-	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Anime Movies", configAnimeMoviesLibraryManual: "Other"})
-	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
-	if err != nil || resp.GetFieldErrors()[configAnimeMoviesLibraryManual] == "" {
-		t.Fatalf("resp = %v, err = %v", resp, err)
-	}
-}
-
-// A lookup that cannot reach Scryer returns an error, so Silo retries the
-// request instead of failing it.
 func TestAnimeMovieLibraryLookupRetriesWhenScryerIsUnreachable(t *testing.T) {
 	r, conn := newTestRouter(t, &fakeScryer{})
 	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Anime Movies"})

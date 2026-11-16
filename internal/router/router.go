@@ -80,20 +80,20 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 
 	input := addTitleInput(req.GetRequest(), seriesMonitorType(conn))
 	var gqlErr *scryer.GraphQLError
-	if name := animeMovieLibrary(conn); name != "" && isAnimeMovie(req.GetRequest()) {
-		id, err := client.LibraryID(ctx, "MOVIE", name)
+	var libraryNote string
+	if choice := animeMovieLibrary(conn); choice != "" && isAnimeMovie(req.GetRequest()) {
+		id, err := client.LibraryID(ctx, "MOVIE", choice)
 		switch {
+		case err == nil:
+			input.LibraryID = &id
 		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrLibraryNotFound):
-			// Falling back to the default library would put the title in the
-			// wrong place, so the target fails with the reason instead.
-			for _, q := range qualities {
-				resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Scryer library for anime movies: "+err.Error()))
-			}
-			return resp, nil
-		case err != nil:
+			// The library was deleted, or Scryer refused to list libraries. The
+			// request still goes through, to the default movie library.
+			libraryNote = " The chosen anime movies library could not be used; the title went to the default movie library."
+		default:
+			// Scryer could not be reached: Silo retries the request.
 			return nil, err
 		}
-		input.LibraryID = &id
 	}
 
 	titleID, err := client.AddTitle(ctx, input)
@@ -112,34 +112,27 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		// The title is monitored, so Scryer's RSS sync still finds it.
 		message = "Added to Scryer, but the search did not start; Scryer will pick it up from its RSS sync."
 	}
+	message += libraryNote
 	for _, q := range qualities {
 		resp.Targets = append(resp.Targets, target(q, titleID, statusQueued, message))
 	}
 	return resp, nil
 }
 
-// Connection config keys for the anime movies library. The first is a
-// dropdown filled from Scryer; the second is a free-text fallback for when the
-// API key cannot read libraries. The dropdown wins when both are set.
-const (
-	configAnimeMoviesLibrary       = "anime_movies_library"
-	configAnimeMoviesLibraryManual = "anime_movies_library_manual"
-)
+// configAnimeMoviesLibrary is the connection config key of the dropdown that
+// picks the Scryer movie library for anime movies. Its value is the library's
+// id, so renaming the library in Scryer does not break the choice; an empty
+// value means the default movie library.
+const configAnimeMoviesLibrary = "anime_movies_library"
 
 func isAnimeMovie(d *pluginv1.RequestDescriptor) bool {
 	return d.GetMediaType() == "movie" && d.GetIsAnime()
 }
 
-// animeMovieLibrary returns the configured library name for anime movies, or ""
-// when none is set (anime movies then go to Scryer's default movie library).
+// animeMovieLibrary returns the chosen library for anime movies, or "" when
+// none is chosen (anime movies then go to Scryer's default movie library).
 func animeMovieLibrary(conn *pluginv1.RouterConnection) string {
-	cfg := conn.GetConfig().GetFields()
-	for _, key := range []string{configAnimeMoviesLibrary, configAnimeMoviesLibraryManual} {
-		if v := strings.TrimSpace(cfg[key].GetStringValue()); v != "" {
-			return v
-		}
-	}
-	return ""
+	return strings.TrimSpace(conn.GetConfig().GetFields()[configAnimeMoviesLibrary].GetStringValue())
 }
 
 // configSeriesMonitorType is the connection config key for how a requested
@@ -336,7 +329,7 @@ func (r *Router) TestConnection(ctx context.Context, req *pluginv1.TestConnectio
 
 // ListConfigOptions offers Scryer's movie libraries for the anime movies
 // dropdown. When Scryer cannot be read (bad key, no permission, unreachable)
-// it offers nothing, and the admin falls back to the manual text field.
+// it offers nothing and anime movies keep going to the default library.
 func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfigOptionsRequest) (*pluginv1.ListConfigOptionsResponse, error) {
 	resp := &pluginv1.ListConfigOptionsResponse{}
 	libs, err := r.newClient(req.GetConnection()).Libraries(ctx, "MOVIE")
@@ -349,33 +342,15 @@ func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 		{Value: "", Label: "Scryer's default movie library"},
 	}}
 	for _, l := range libs {
-		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.Name, Label: l.Name})
+		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.ID, Label: l.Name})
 	}
 	resp.OptionsByField = map[string]*pluginv1.ConfigOptionList{configAnimeMoviesLibrary: list}
 	return resp, nil
 }
 
-// Validate checks that the anime movies library exists in Scryer. When
-// Scryer cannot be read it accepts the name as typed: the check is only a
-// convenience, and Fulfill reports a missing library on the request.
-func (r *Router) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
-	resp := &pluginv1.ValidateResponse{}
-	conn := req.GetConnection()
-	name := animeMovieLibrary(conn)
-	if name == "" {
-		return resp, nil
-	}
-	fields := conn.GetConfig().GetFields()
-	field := configAnimeMoviesLibrary
-	if strings.TrimSpace(fields[configAnimeMoviesLibrary].GetStringValue()) == "" {
-		field = configAnimeMoviesLibraryManual
-	} else if strings.TrimSpace(fields[configAnimeMoviesLibraryManual].GetStringValue()) != "" {
-		// The list wins, so a typed name would be ignored without notice.
-		resp.FieldErrors = map[string]string{configAnimeMoviesLibraryManual: "Clear the library chosen in the list above to use a typed name."}
-		return resp, nil
-	}
-	if _, err := r.newClient(conn).LibraryID(ctx, "MOVIE", name); errors.Is(err, scryer.ErrLibraryNotFound) {
-		resp.FieldErrors = map[string]string{field: err.Error()}
-	}
-	return resp, nil
+// Validate accepts every server: the only library setting is a dropdown of
+// libraries that exist in Scryer, and one that has gone is handled when a
+// request is fulfilled.
+func (r *Router) Validate(context.Context, *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
+	return &pluginv1.ValidateResponse{}, nil
 }

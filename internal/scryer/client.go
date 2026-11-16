@@ -114,22 +114,22 @@ func (c *Client) Libraries(ctx context.Context, facet string) ([]Library, error)
 	return out.Libraries, nil
 }
 
-// ErrLibraryNotFound means no library of the facet has the requested name.
-var ErrLibraryNotFound = errors.New("no library with that name")
+// ErrLibraryNotFound means no library of the facet matches.
+var ErrLibraryNotFound = errors.New("no such library")
 
-// LibraryID finds a library of the facet by name, ignoring case and
-// surrounding spaces.
-func (c *Client) LibraryID(ctx context.Context, facet, name string) (string, error) {
+// LibraryID checks that a library of the facet with this id exists and returns
+// it.
+func (c *Client) LibraryID(ctx context.Context, facet, id string) (string, error) {
 	libs, err := c.Libraries(ctx, facet)
 	if err != nil {
 		return "", err
 	}
 	for _, l := range libs {
-		if strings.EqualFold(strings.TrimSpace(l.Name), strings.TrimSpace(name)) {
+		if l.ID == id {
 			return l.ID, nil
 		}
 	}
-	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
+	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, id)
 }
 
 // AddTitle creates the title, or reuses it when Scryer already has it, and
