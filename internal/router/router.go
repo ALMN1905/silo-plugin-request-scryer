@@ -343,7 +343,11 @@ func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 	if err != nil {
 		return resp, nil
 	}
-	list := &pluginv1.ConfigOptionList{}
+	// Silo's form fills an empty dynamic choice with the first option, so the
+	// first option is "none": the field must be able to stay unset.
+	list := &pluginv1.ConfigOptionList{Options: []*pluginv1.ConfigOption{
+		{Value: "", Label: "Scryer's default movie library"},
+	}}
 	for _, l := range libs {
 		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.Name, Label: l.Name})
 	}
@@ -361,9 +365,14 @@ func (r *Router) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*
 	if name == "" {
 		return resp, nil
 	}
+	fields := conn.GetConfig().GetFields()
 	field := configAnimeMoviesLibrary
-	if strings.TrimSpace(conn.GetConfig().GetFields()[configAnimeMoviesLibrary].GetStringValue()) == "" {
+	if strings.TrimSpace(fields[configAnimeMoviesLibrary].GetStringValue()) == "" {
 		field = configAnimeMoviesLibraryManual
+	} else if strings.TrimSpace(fields[configAnimeMoviesLibraryManual].GetStringValue()) != "" {
+		// The list wins, so a typed name would be ignored without notice.
+		resp.FieldErrors = map[string]string{configAnimeMoviesLibraryManual: "Clear the library chosen in the list above to use a typed name."}
+		return resp, nil
 	}
 	if _, err := r.newClient(conn).LibraryID(ctx, "MOVIE", name); errors.Is(err, scryer.ErrLibraryNotFound) {
 		resp.FieldErrors = map[string]string{field: err.Error()}

@@ -100,13 +100,14 @@ type Library struct {
 	Facet string `json:"facet"`
 }
 
-// Libraries lists the libraries the API key can see for a facet (MOVIE,
-// SERIES or ANIME).
+// Libraries lists the libraries of a facet (MOVIE, SERIES or ANIME) the API
+// key can add titles to. Scryer lists libraries the key can only view unless
+// asked for a permission, and adding a title needs ManageTitles.
 func (c *Client) Libraries(ctx context.Context, facet string) ([]Library, error) {
 	var out struct {
 		Libraries []Library `json:"libraries"`
 	}
-	const q = `query SiloLibraries($facet: MediaFacetValue) { libraries(facet: $facet) { id name slug facet } }`
+	const q = `query SiloLibraries($facet: MediaFacetValue) { libraries(facet: $facet, permission: MANAGE_TITLES) { id name slug facet } }`
 	if err := c.do(ctx, q, map[string]any{"facet": facet}, &out); err != nil {
 		return nil, err
 	}

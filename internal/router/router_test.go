@@ -16,13 +16,14 @@ import (
 // fakeScryer answers the plugin's GraphQL operations and records the last
 // addTitle input.
 type fakeScryer struct {
-	t        *testing.T
-	added    map[string]any
-	searches int
-	addError string
-	title    map[string]any // nil: the title is gone
-	libs     []map[string]any
-	libsErr  string // makes the libraries query fail
+	t         *testing.T
+	added     map[string]any
+	searches  int
+	addError  string
+	title     map[string]any // nil: the title is gone
+	libs      []map[string]any
+	libsErr   string // makes the libraries query fail
+	libsQuery string // the last libraries query sent
 }
 
 func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +52,7 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.added = body.Variables["input"].(map[string]any)
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}}}})
 	case strings.Contains(body.Query, "libraries("):
+		f.libsQuery = body.Query
 		if f.libsErr != "" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.libsErr}}})
 			return
@@ -293,8 +295,14 @@ func TestListConfigOptionsOffersMovieLibraries(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := resp.GetOptionsByField()[configAnimeMoviesLibrary].GetOptions()
-	if len(opts) != 2 || opts[1].GetValue() != "Anime Movies" {
+	// Silo fills an empty dynamic choice with the first option, so "none"
+	// comes first and the field can stay unset.
+	if len(opts) != 3 || opts[0].GetValue() != "" || opts[2].GetValue() != "Anime Movies" {
 		t.Fatalf("options = %v", opts)
+	}
+	// Only libraries the key can add titles to are offered.
+	if !strings.Contains(fake.libsQuery, "MANAGE_TITLES") {
+		t.Fatalf("libraries query = %q", fake.libsQuery)
 	}
 }
 
@@ -390,5 +398,34 @@ func TestMoviesSendNoMonitorOptions(t *testing.T) {
 	}
 	if _, ok := fake.added["options"]; ok || fake.added["monitored"] != true {
 		t.Fatalf("movie input = %v", fake.added)
+	}
+}
+
+func TestValidateChecksTheLibraryChosenInTheList(t *testing.T) {
+	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Movies"}}})
+	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Gone"})
+	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
+	if err != nil || resp.GetFieldErrors()[configAnimeMoviesLibrary] == "" {
+		t.Fatalf("resp = %v, err = %v", resp, err)
+	}
+}
+
+func TestValidateRefusesATypedNameTheListOverrides(t *testing.T) {
+	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Anime Movies"}}})
+	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Anime Movies", configAnimeMoviesLibraryManual: "Other"})
+	resp, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
+	if err != nil || resp.GetFieldErrors()[configAnimeMoviesLibraryManual] == "" {
+		t.Fatalf("resp = %v, err = %v", resp, err)
+	}
+}
+
+// A lookup that cannot reach Scryer returns an error, so Silo retries the
+// request instead of failing it.
+func TestAnimeMovieLibraryLookupRetriesWhenScryerIsUnreachable(t *testing.T) {
+	r, conn := newTestRouter(t, &fakeScryer{})
+	withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "Anime Movies"})
+	conn.BaseUrl = "http://127.0.0.1:1/"
+	if _, err := fulfill(t, r, conn, animeMovie()); err == nil {
+		t.Fatal("Fulfill succeeded with Scryer unreachable")
 	}
 }
