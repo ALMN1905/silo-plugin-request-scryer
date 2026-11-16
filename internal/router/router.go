@@ -96,7 +96,19 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 
-	titleID, err := client.AddTitle(ctx, input)
+	// Scryer refuses a tag that is not defined, so define the tags first; if
+	// that fails the title is still added, without them.
+	tags := requestTags(conn, req.GetRequest())
+	var tagNote string
+	if len(tags) > 0 {
+		if err := client.EnsureTags(ctx, tags); err != nil {
+			tagNote = " Not tagged: " + err.Error() + "."
+			tags = nil
+		}
+	}
+	input.Tags = append(input.Tags, tags...)
+
+	added, err := client.AddTitle(ctx, input)
 	switch {
 	case errors.As(err, &gqlErr):
 		for _, q := range qualities {
@@ -107,12 +119,26 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		return nil, err
 	}
 
+	titleID := added.ID
+
+	// Scryer ignores the tags of an addTitle that finds the title already in
+	// the library, so, when the admin allows tagging existing titles, they are
+	// applied afterwards. Which titles exist cannot be looked up beforehand
+	// reliably (Scryer's metadata search reported an existing title as new),
+	// but addTitle itself says whether it reused one.
+	if added.Reused && len(tags) > 0 && tagExistingTitles(conn) {
+		if err := client.UpdateTitleTags(ctx, titleID, tags); err != nil {
+			tagNote = " Not tagged: " + err.Error() + "."
+		}
+	}
+
 	message := "Added to Scryer; searching for a release."
 	if err := client.Search(ctx, titleID); err != nil {
 		// The title is monitored, so Scryer's RSS sync still finds it.
 		message = "Added to Scryer, but the search did not start; Scryer will pick it up from its RSS sync."
 	}
 	message += libraryNote
+	message += tagNote
 	for _, q := range qualities {
 		resp.Targets = append(resp.Targets, target(q, titleID, statusQueued, message))
 	}
@@ -159,6 +185,34 @@ func seriesMonitorType(conn *pluginv1.RouterConnection) string {
 		return v
 	}
 	return ""
+}
+
+// Connection config keys of the tagging switches; absent means off, so nothing
+// changes until the admin chooses it.
+const (
+	configTagTitles         = "tag_titles"
+	configTagExistingTitles = "tag_existing_titles"
+)
+
+// tagExistingTitles reports whether a title Scryer already had is tagged too.
+// Tags can drive Scryer's maintenance rules, so touching a title the plugin did
+// not add is something the admin opts into.
+func tagExistingTitles(conn *pluginv1.RouterConnection) bool {
+	return conn.GetConfig().GetFields()[configTagExistingTitles].GetBoolValue()
+}
+
+// requestTags returns the tags for a requested title: a common one to find
+// every Silo request, and one for the requester. Scryer stores labels lowercase
+// with whitespace collapsed, so they are built that way.
+func requestTags(conn *pluginv1.RouterConnection, d *pluginv1.RequestDescriptor) []string {
+	if !conn.GetConfig().GetFields()[configTagTitles].GetBoolValue() {
+		return nil
+	}
+	tags := []string{"silo-request"}
+	if user := strings.Join(strings.Fields(strings.ToLower(d.GetRequesterUsername())), "-"); user != "" {
+		tags = append(tags, "silo-user-"+user)
+	}
+	return tags
 }
 
 func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.AddTitle {

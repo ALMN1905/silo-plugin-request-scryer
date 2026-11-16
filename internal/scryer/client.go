@@ -132,24 +132,70 @@ func (c *Client) LibraryID(ctx context.Context, facet, id string) (string, error
 	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, id)
 }
 
-// AddTitle creates the title, or reuses it when Scryer already has it, and
-// returns its ID.
-func (c *Client) AddTitle(ctx context.Context, in AddTitle) (string, error) {
+// AddedTitle is the result of AddTitle.
+type AddedTitle struct {
+	ID string
+	// Reused is true when the target library already had the title. Scryer
+	// then ignores the tags sent with the add, so they have to be applied with
+	// UpdateTitleTags.
+	Reused bool
+}
+
+// AddTitle creates the title, or reuses it when Scryer already has it in the
+// target library, and returns its ID.
+func (c *Client) AddTitle(ctx context.Context, in AddTitle) (AddedTitle, error) {
 	var out struct {
 		AddTitle struct {
 			Title struct {
 				ID string `json:"id"`
 			} `json:"title"`
+			Reused bool `json:"reusedExistingTitle"`
 		} `json:"addTitle"`
 	}
 	const q = `mutation SiloAddTitle($input: AddTitleInput!) { addTitle(input: $input) { title { id } reusedExistingTitle } }`
 	if err := c.do(ctx, q, map[string]any{"input": in}, &out); err != nil {
-		return "", err
+		return AddedTitle{}, err
 	}
 	if out.AddTitle.Title.ID == "" {
-		return "", errors.New("scryer returned no title id")
+		return AddedTitle{}, errors.New("scryer returned no title id")
 	}
-	return out.AddTitle.Title.ID, nil
+	return AddedTitle{ID: out.AddTitle.Title.ID, Reused: out.AddTitle.Reused}, nil
+}
+
+// EnsureTags makes sure every label is defined in Scryer's title-tag registry.
+// Scryer refuses addTitle for a tag that is not defined, and defining one needs
+// the catalog-settings permission, so a failure here is the caller's cue to
+// add the title without tags.
+func (c *Client) EnsureTags(ctx context.Context, labels []string) error {
+	var out struct {
+		Definitions []struct {
+			Label string `json:"label"`
+		} `json:"titleTagDefinitions"`
+	}
+	if err := c.do(ctx, `query SiloTags { titleTagDefinitions { label } }`, nil, &out); err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, d := range out.Definitions {
+		have[d.Label] = true
+	}
+	const q = `mutation SiloCreateTag($input: CreateTitleTagDefinitionInput!) { createTitleTagDefinition(input: $input) { __typename } }`
+	for _, label := range labels {
+		if have[label] {
+			continue
+		}
+		in := map[string]any{"label": label, "description": "Added by the Silo request plugin"}
+		if err := c.do(ctx, q, map[string]any{"input": in}, &struct{}{}); err != nil {
+			return fmt.Errorf("create tag %q: %w", label, err)
+		}
+	}
+	return nil
+}
+
+// UpdateTitleTags adds already defined tags to a title.
+func (c *Client) UpdateTitleTags(ctx context.Context, titleID string, add []string) error {
+	const q = `mutation SiloTagTitle($input: UpdateTitleTagsInput!) { updateTitleTags(input: $input) { id } }`
+	return c.do(ctx, q, map[string]any{"input": map[string]any{"titleIds": []string{titleID}, "add": add}}, &struct{}{})
 }
 
 // Search starts Scryer's automatic search for a title.

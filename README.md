@@ -24,6 +24,8 @@ Series are requested whole. Anime series go to Scryer's anime library.
 
 Scryer has no anime movie catalog, so anime movies go to the default movie library unless you pick another one: in the server's settings, choose **Anime movies library** from the list of Scryer movie libraries the API key can add titles to (it needs **Manage titles** on that library). *Scryer's default movie library* leaves them where they are. The choice is kept by library id, so renaming the library in Scryer does not break it; if the library is later deleted, or Scryer refuses to list libraries, the request still goes through, to the default movie library. Scryer matches existing titles within one library, so an anime movie that is already in another movie library (the default one, say) is added again to the anime library and downloaded again.
 
+Titles can be tagged `silo-request` and `silo-user-<username>` in Scryer (switch **Tag titles with the requester**, off until chosen), so Silo requests can be filtered and managed together. Scryer refuses a tag that is not defined, so the plugin defines missing tags first; if that is not allowed (the key needs the catalog-settings permission) the title is added without tags and the request says so. Titles Scryer already had are left untouched unless **Also tag titles Scryer already had** is on (tags can drive Scryer's maintenance rules, so this is opt-in); `addTitle` ignores tags for an existing title, so the plugin then follows up with `updateTitleTags`.
+
 ## Setup
 
 1. In Scryer, create an API key under your profile's **API keys**.

@@ -37,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"},\"tag_existing_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -73,6 +73,28 @@
                     "value": "FUTURE_EPISODES",
                     "label": "Future episodes only",
                     "description": "Episodes that have not aired yet. No backlog download."
+                  }
+                ]
+              },
+              {
+                "key": "tag_titles",
+                "label": "Tag titles with the requester",
+                "description": "Adds the tags silo-request and silo-user-<username> to every title the plugin adds, so Silo requests can be filtered and managed together. The tags are created in Scryer when missing; if that is not allowed, the title is added without them.",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false
+              },
+              {
+                "key": "tag_existing_titles",
+                "label": "Also tag titles Scryer already had",
+                "description": "OFF: only titles the plugin newly adds are tagged. ON: a title Scryer already had in the library also gets the tags when it is requested again. Tags can drive Scryer's maintenance rules, so turn this on only if a rule on these tags should also apply to older titles.",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false,
+                "show_when": [
+                  {
+                    "field": "tag_titles",
+                    "equals": [
+                      "true"
+                    ]
                   }
                 ]
               }
