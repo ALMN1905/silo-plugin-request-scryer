@@ -20,9 +20,9 @@ Silo also completes a request on its own once the title reaches its library.
 
 Series are requested whole. Anime series go to Scryer's anime library.
 
-Scryer does not apply a library's default monitoring when a title is added through the API, so the plugin sends its own choice, set in the server's settings under **Series and anime monitoring**: *All episodes* (default, the whole series that was requested), *Missing and future episodes* or *Future episodes only* (no backlog download). Movies are always added monitored.
+**Series and anime monitoring** in the server's settings picks which episodes Scryer monitors for a requested series: *Leave to Scryer* (default), *All episodes*, *Missing and future episodes* or *Future episodes only* (no backlog download). With *Leave to Scryer* the plugin sends no choice: a new series has every episode monitored (Scryer does not apply the library's default monitoring to titles added through the API), and a series Scryer already has keeps its monitoring. Any other choice is also applied to a series Scryer already has, replacing its monitoring there, including a season selection. Movies are always added monitored.
 
-Scryer has no anime movie catalog, so anime movies go to the default movie library unless you pick another one: in the server's settings, choose **Anime movies library** from the list of Scryer movie libraries. If the API key cannot read libraries and the list is empty, type the exact library name in **Anime movies library (manual name)** instead. The name is matched ignoring case; if no library has it, the request fails with that reason rather than landing in the default library.
+Scryer has no anime movie catalog, so anime movies go to the default movie library unless you pick another one: in the server's settings, choose **Anime movies library** from the list of Scryer movie libraries. If the API key cannot read libraries and the list is empty, type the exact library name in **Anime movies library (manual name)** instead. The name is matched ignoring case; if no library has it, the request fails with that reason rather than landing in the default library. Scryer matches existing titles within one library, so an anime movie that is already in another movie library (the default one, say) is added again to the anime library and downloaded again.
 
 ## Setup
 

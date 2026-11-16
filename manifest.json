@@ -43,7 +43,7 @@
               {
                 "key": "anime_movies_library",
                 "label": "Anime movies library",
-                "description": "Scryer movie library that receives anime movies. Leave empty to use Scryer's default movie library.",
+                "description": "Scryer movie library that receives anime movies. Leave empty to use Scryer's default movie library. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
                 "dynamic_options": true
               },
@@ -57,10 +57,15 @@
               {
                 "key": "series_monitor_type",
                 "label": "Series and anime monitoring",
-                "description": "Which episodes Scryer monitors (and so downloads) when a whole series or anime is requested. Scryer does not apply the library default on this path, so the plugin sends its own choice.",
+                "description": "Which episodes Scryer monitors (and so downloads) when a series or anime is requested. A choice other than Leave to Scryer also applies when the series is already in Scryer, replacing its monitoring there.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
-                "default_value": "ALL_EPISODES",
+                "default_value": "DEFAULT",
                 "options": [
+                  {
+                    "value": "DEFAULT",
+                    "label": "Leave to Scryer",
+                    "description": "Send no monitoring choice. A new series has every episode monitored; one already in Scryer keeps its monitoring."
+                  },
                   {
                     "value": "ALL_EPISODES",
                     "label": "All episodes",

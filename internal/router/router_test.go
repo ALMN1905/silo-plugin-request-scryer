@@ -324,7 +324,7 @@ func TestValidateAcceptsTheNameWhenLibrariesCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestSeriesAndAnimeSendTheConfiguredMonitorType(t *testing.T) {
+func TestSeriesAndAnimeSendOnlyAChosenMonitorType(t *testing.T) {
 	series := &pluginv1.RequestDescriptor{MediaType: "series", Title: "24", ExternalIds: map[string]string{"tvdb": "76290"}}
 	anime := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Barakamon", IsAnime: true, ExternalIds: map[string]string{"tvdb": "1"}}
 	cases := []struct {
@@ -333,12 +333,16 @@ func TestSeriesAndAnimeSendTheConfiguredMonitorType(t *testing.T) {
 		cfg  map[string]any
 		want string
 	}{
-		{"series default", series, nil, "ALL_EPISODES"},
-		{"anime default", anime, nil, "ALL_EPISODES"},
+		// No choice sends no options, so a series Scryer already has keeps its
+		// monitoring: Scryer applies a sent type to an existing title too.
+		{"series, nothing saved", series, nil, ""},
+		{"anime, nothing saved", anime, nil, ""},
+		{"leave to Scryer", series, map[string]any{configSeriesMonitorType: "DEFAULT"}, ""},
 		{"series configured", series, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES"}, "FUTURE_EPISODES"},
 		{"anime configured", anime, map[string]any{configSeriesMonitorType: "MISSING_AND_FUTURE_EPISODES"}, "MISSING_AND_FUTURE_EPISODES"},
-		{"unknown value falls back", series, map[string]any{configSeriesMonitorType: "ADVANCED"}, "ALL_EPISODES"},
-		{"unmonitored is not offered", series, map[string]any{configSeriesMonitorType: "UNMONITORED"}, "ALL_EPISODES"},
+		{"all episodes configured", series, map[string]any{configSeriesMonitorType: "ALL_EPISODES"}, "ALL_EPISODES"},
+		{"unknown value sends none", series, map[string]any{configSeriesMonitorType: "ADVANCED"}, ""},
+		{"unmonitored is not offered", series, map[string]any{configSeriesMonitorType: "UNMONITORED"}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -358,7 +362,13 @@ func TestSeriesAndAnimeSendTheConfiguredMonitorType(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			opts, _ := fake.added["options"].(map[string]any)
+			opts, sent := fake.added["options"].(map[string]any)
+			if tc.want == "" {
+				if sent {
+					t.Fatalf("options sent with no monitoring chosen: %v", opts)
+				}
+				return
+			}
 			if opts["monitorType"] != tc.want {
 				t.Fatalf("options = %v, want monitorType %s", fake.added["options"], tc.want)
 			}

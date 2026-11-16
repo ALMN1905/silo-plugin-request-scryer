@@ -146,12 +146,6 @@ func animeMovieLibrary(conn *pluginv1.RouterConnection) string {
 // series or anime is monitored.
 const configSeriesMonitorType = "series_monitor_type"
 
-// defaultSeriesMonitorType is used when the setting is empty or unknown. A
-// request names the whole series, so everything is monitored unless the admin
-// chooses otherwise. Scryer does not apply the library's default monitoring on
-// the addTitle path, so the plugin has to send its own choice.
-const defaultSeriesMonitorType = "ALL_EPISODES"
-
 // seriesMonitorTypes are the Scryer MonitorTypeValue names offered for series.
 // UNMONITORED would make a request do nothing, ADVANCED needs a season
 // selection and NONE is not a monitoring choice.
@@ -161,13 +155,17 @@ var seriesMonitorTypes = map[string]bool{
 	"FUTURE_EPISODES":             true,
 }
 
-// seriesMonitorType returns the monitoring to send for a series or anime.
+// seriesMonitorType returns the monitoring to send for a series or anime, or
+// "" to send none. Nothing is sent unless the admin picked a type: Scryer
+// applies a sent type to a title it already has too (replacing its monitor
+// type and clearing any season selection), so sending one by default would
+// change the monitoring of every series that is requested again.
 func seriesMonitorType(conn *pluginv1.RouterConnection) string {
 	v := strings.TrimSpace(conn.GetConfig().GetFields()[configSeriesMonitorType].GetStringValue())
 	if seriesMonitorTypes[v] {
 		return v
 	}
-	return defaultSeriesMonitorType
+	return ""
 }
 
 func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.AddTitle {
@@ -182,7 +180,9 @@ func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.Add
 		if d.GetIsAnime() {
 			in.Facet = "ANIME"
 		}
-		in.Options = &scryer.TitleOptions{MonitorType: monitorType}
+		if monitorType != "" {
+			in.Options = &scryer.TitleOptions{MonitorType: monitorType}
+		}
 	}
 	if y := int(d.GetYear()); y > 0 {
 		in.Year = &y
