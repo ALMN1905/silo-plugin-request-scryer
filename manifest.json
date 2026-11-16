@@ -18,8 +18,14 @@
     "license_spdx": "AGPL-3.0-or-later"
   },
   "supported_platforms": [
-    { "os": "linux", "arch": "amd64" },
-    { "os": "linux", "arch": "arm64" }
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
   ],
   "capabilities": [
     {
@@ -31,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"anime_movies_library_manual\":{\"type\":\"string\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"anime_movies_library_manual\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -47,6 +53,30 @@
                 "description": "Only if the list above is empty because the API key cannot read Scryer's libraries: type the exact library name.",
                 "control": "ADMIN_FORM_CONTROL_TEXT",
                 "placeholder": "Anime Movies"
+              },
+              {
+                "key": "series_monitor_type",
+                "label": "Series and anime monitoring",
+                "description": "Which episodes Scryer monitors (and so downloads) when a whole series or anime is requested. Scryer does not apply the library default on this path, so the plugin sends its own choice.",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "ALL_EPISODES",
+                "options": [
+                  {
+                    "value": "ALL_EPISODES",
+                    "label": "All episodes",
+                    "description": "Every episode, including already aired ones."
+                  },
+                  {
+                    "value": "MISSING_AND_FUTURE_EPISODES",
+                    "label": "Missing and future episodes",
+                    "description": "Everything Scryer has no file for, plus future episodes."
+                  },
+                  {
+                    "value": "FUTURE_EPISODES",
+                    "label": "Future episodes only",
+                    "description": "Episodes that have not aired yet. No backlog download."
+                  }
+                ]
               }
             ]
           }
@@ -56,8 +86,14 @@
         "reports_download_progress": true,
         "wording": {
           "step": "Scryer",
-          "queued": { "label": "Searching", "detail": "Scryer is looking for a copy." },
-          "downloading": { "label": "Downloading", "detail": "Scryer is downloading it." }
+          "queued": {
+            "label": "Searching",
+            "detail": "Scryer is looking for a copy."
+          },
+          "downloading": {
+            "label": "Downloading",
+            "detail": "Scryer is downloading it."
+          }
         }
       }
     }

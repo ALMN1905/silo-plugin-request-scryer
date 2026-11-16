@@ -78,7 +78,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 
-	input := addTitleInput(req.GetRequest())
+	input := addTitleInput(req.GetRequest(), seriesMonitorType(conn))
 	var gqlErr *scryer.GraphQLError
 	if name := animeMovieLibrary(conn); name != "" && isAnimeMovie(req.GetRequest()) {
 		id, err := client.LibraryID(ctx, "MOVIE", name)
@@ -142,7 +142,35 @@ func animeMovieLibrary(conn *pluginv1.RouterConnection) string {
 	return ""
 }
 
-func addTitleInput(d *pluginv1.RequestDescriptor) scryer.AddTitle {
+// configSeriesMonitorType is the connection config key for how a requested
+// series or anime is monitored.
+const configSeriesMonitorType = "series_monitor_type"
+
+// defaultSeriesMonitorType is used when the setting is empty or unknown. A
+// request names the whole series, so everything is monitored unless the admin
+// chooses otherwise. Scryer does not apply the library's default monitoring on
+// the addTitle path, so the plugin has to send its own choice.
+const defaultSeriesMonitorType = "ALL_EPISODES"
+
+// seriesMonitorTypes are the Scryer MonitorTypeValue names offered for series.
+// UNMONITORED would make a request do nothing, ADVANCED needs a season
+// selection and NONE is not a monitoring choice.
+var seriesMonitorTypes = map[string]bool{
+	"ALL_EPISODES":                true,
+	"MISSING_AND_FUTURE_EPISODES": true,
+	"FUTURE_EPISODES":             true,
+}
+
+// seriesMonitorType returns the monitoring to send for a series or anime.
+func seriesMonitorType(conn *pluginv1.RouterConnection) string {
+	v := strings.TrimSpace(conn.GetConfig().GetFields()[configSeriesMonitorType].GetStringValue())
+	if seriesMonitorTypes[v] {
+		return v
+	}
+	return defaultSeriesMonitorType
+}
+
+func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.AddTitle {
 	in := scryer.AddTitle{
 		Name:      d.GetTitle(),
 		Facet:     "MOVIE",
@@ -154,6 +182,7 @@ func addTitleInput(d *pluginv1.RequestDescriptor) scryer.AddTitle {
 		if d.GetIsAnime() {
 			in.Facet = "ANIME"
 		}
+		in.Options = &scryer.TitleOptions{MonitorType: monitorType}
 	}
 	if y := int(d.GetYear()); y > 0 {
 		in.Year = &y

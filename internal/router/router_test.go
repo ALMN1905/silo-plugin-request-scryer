@@ -323,3 +323,62 @@ func TestValidateAcceptsTheNameWhenLibrariesCannotBeRead(t *testing.T) {
 		t.Fatalf("resp = %v, err = %v", resp, err)
 	}
 }
+
+func TestSeriesAndAnimeSendTheConfiguredMonitorType(t *testing.T) {
+	series := &pluginv1.RequestDescriptor{MediaType: "series", Title: "24", ExternalIds: map[string]string{"tvdb": "76290"}}
+	anime := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Barakamon", IsAnime: true, ExternalIds: map[string]string{"tvdb": "1"}}
+	cases := []struct {
+		name string
+		d    *pluginv1.RequestDescriptor
+		cfg  map[string]any
+		want string
+	}{
+		{"series default", series, nil, "ALL_EPISODES"},
+		{"anime default", anime, nil, "ALL_EPISODES"},
+		{"series configured", series, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES"}, "FUTURE_EPISODES"},
+		{"anime configured", anime, map[string]any{configSeriesMonitorType: "MISSING_AND_FUTURE_EPISODES"}, "MISSING_AND_FUTURE_EPISODES"},
+		{"unknown value falls back", series, map[string]any{configSeriesMonitorType: "ADVANCED"}, "ALL_EPISODES"},
+		{"unmonitored is not offered", series, map[string]any{configSeriesMonitorType: "UNMONITORED"}, "ALL_EPISODES"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeScryer{}
+			r, conn := newTestRouter(t, fake)
+			if tc.cfg != nil {
+				st, err := structpb.NewStruct(tc.cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conn.Config = st
+			}
+			if _, err := r.Fulfill(context.Background(), &pluginv1.FulfillRequest{
+				Request:     tc.d,
+				Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p"}},
+				Connections: []*pluginv1.RouterConnection{conn},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			opts, _ := fake.added["options"].(map[string]any)
+			if opts["monitorType"] != tc.want {
+				t.Fatalf("options = %v, want monitorType %s", fake.added["options"], tc.want)
+			}
+		})
+	}
+}
+
+// Whether Scryer accepts options.monitorType on a movie is not verified, so a
+// movie keeps sending only monitored: true.
+func TestMoviesSendNoMonitorOptions(t *testing.T) {
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	if _, err := r.Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", ExternalIds: map[string]string{"tmdb": "348"}},
+		Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p"}},
+		Connections: []*pluginv1.RouterConnection{conn},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fake.added["options"]; ok || fake.added["monitored"] != true {
+		t.Fatalf("movie input = %v", fake.added)
+	}
+}
