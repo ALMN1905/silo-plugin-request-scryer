@@ -18,8 +18,14 @@
     "license_spdx": "AGPL-3.0-or-later"
   },
   "supported_platforms": [
-    { "os": "linux", "arch": "amd64" },
-    { "os": "linux", "arch": "arm64" }
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
   ],
   "capabilities": [
     {
@@ -27,12 +33,72 @@
       "id": "scryer",
       "display_name": "Scryer",
       "description": "Adds approved requests to Scryer and follows their downloads.",
+      "config_schema": [
+        {
+          "key": "connection",
+          "title": "Scryer server",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"anime_movies_library_manual\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"}}}",
+          "admin_form": {
+            "fields": [
+              {
+                "key": "anime_movies_library",
+                "label": "Anime movies library",
+                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "dynamic_options": true
+              },
+              {
+                "key": "anime_movies_library_manual",
+                "label": "Anime movies library (manual name)",
+                "description": "Only if the list above is empty because the API key cannot read Scryer's libraries: type the exact library name.",
+                "control": "ADMIN_FORM_CONTROL_TEXT",
+                "placeholder": "Anime Movies"
+              },
+              {
+                "key": "series_monitor_type",
+                "label": "Series and anime monitoring",
+                "description": "Which episodes Scryer monitors (and so downloads) when a series or anime is requested. A choice other than Leave to Scryer also applies when the series is already in Scryer, replacing its monitoring there.",
+                "control": "ADMIN_FORM_CONTROL_SELECT",
+                "default_value": "DEFAULT",
+                "options": [
+                  {
+                    "value": "DEFAULT",
+                    "label": "Leave to Scryer",
+                    "description": "Send no monitoring choice. A new series has every episode monitored; one already in Scryer keeps its monitoring."
+                  },
+                  {
+                    "value": "ALL_EPISODES",
+                    "label": "All episodes",
+                    "description": "Every episode, including already aired ones."
+                  },
+                  {
+                    "value": "MISSING_AND_FUTURE_EPISODES",
+                    "label": "Missing and future episodes",
+                    "description": "Everything Scryer has no file for, plus future episodes."
+                  },
+                  {
+                    "value": "FUTURE_EPISODES",
+                    "label": "Future episodes only",
+                    "description": "Episodes that have not aired yet. No backlog download."
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
       "request_router": {
         "reports_download_progress": true,
         "wording": {
           "step": "Scryer",
-          "queued": { "label": "Searching", "detail": "Scryer is looking for a copy." },
-          "downloading": { "label": "Downloading", "detail": "Scryer is downloading it." }
+          "queued": {
+            "label": "Searching",
+            "detail": "Scryer is looking for a copy."
+          },
+          "downloading": {
+            "label": "Downloading",
+            "detail": "Scryer is downloading it."
+          }
         }
       }
     }

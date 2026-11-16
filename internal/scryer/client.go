@@ -41,14 +41,23 @@ func New(baseURL, apiKey string) *Client {
 
 // AddTitle is the subset of Scryer's AddTitleInput this plugin sends.
 type AddTitle struct {
-	Name      string   `json:"name"`
-	Facet     string   `json:"facet"` // MOVIE, SERIES or ANIME
-	Monitored bool     `json:"monitored"`
-	Tags      []string `json:"tags"`
-	Year      *int     `json:"year,omitempty"`
-	TmdbID    *int64   `json:"tmdbId,omitempty"`
-	TvdbID    *string  `json:"tvdbId,omitempty"`
-	ImdbID    *string  `json:"imdbId,omitempty"`
+	Name      string        `json:"name"`
+	Facet     string        `json:"facet"`               // MOVIE, SERIES or ANIME
+	LibraryID *string       `json:"libraryId,omitempty"` // nil: Scryer picks the facet's default library
+	Monitored bool          `json:"monitored"`
+	Options   *TitleOptions `json:"options,omitempty"`
+	Tags      []string      `json:"tags"`
+	Year      *int          `json:"year,omitempty"`
+	TmdbID    *int64        `json:"tmdbId,omitempty"`
+	TvdbID    *string       `json:"tvdbId,omitempty"`
+	ImdbID    *string       `json:"imdbId,omitempty"`
+}
+
+// TitleOptions is the subset of Scryer's TitleOptionsInput this plugin sends.
+type TitleOptions struct {
+	// MonitorType is one of Scryer's MonitorTypeValue names. Only sent for
+	// series and anime; whether Scryer accepts it on a movie is not verified.
+	MonitorType string `json:"monitorType,omitempty"`
 }
 
 // QueueItem is one download Scryer tracks for a title.
@@ -81,6 +90,46 @@ func (c *Client) Me(ctx context.Context) error {
 		return ErrUnauthorized
 	}
 	return nil
+}
+
+// Library is one Scryer library.
+type Library struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Slug  string `json:"slug"`
+	Facet string `json:"facet"`
+}
+
+// Libraries lists the libraries of a facet (MOVIE, SERIES or ANIME) the API
+// key can add titles to. Scryer lists libraries the key can only view unless
+// asked for a permission, and adding a title needs ManageTitles.
+func (c *Client) Libraries(ctx context.Context, facet string) ([]Library, error) {
+	var out struct {
+		Libraries []Library `json:"libraries"`
+	}
+	const q = `query SiloLibraries($facet: MediaFacetValue) { libraries(facet: $facet, permission: MANAGE_TITLES) { id name slug facet } }`
+	if err := c.do(ctx, q, map[string]any{"facet": facet}, &out); err != nil {
+		return nil, err
+	}
+	return out.Libraries, nil
+}
+
+// ErrLibraryNotFound means no library of the facet has the requested name.
+var ErrLibraryNotFound = errors.New("no library with that name")
+
+// LibraryID finds a library of the facet by name, ignoring case and
+// surrounding spaces.
+func (c *Client) LibraryID(ctx context.Context, facet, name string) (string, error) {
+	libs, err := c.Libraries(ctx, facet)
+	if err != nil {
+		return "", err
+	}
+	for _, l := range libs {
+		if strings.EqualFold(strings.TrimSpace(l.Name), strings.TrimSpace(name)) {
+			return l.ID, nil
+		}
+	}
+	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, name)
 }
 
 // AddTitle creates the title, or reuses it when Scryer already has it, and
