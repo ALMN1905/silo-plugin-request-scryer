@@ -37,22 +37,15 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"anime_movies_library_manual\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"}}}",
           "admin_form": {
             "fields": [
               {
                 "key": "anime_movies_library",
                 "label": "Anime movies library",
-                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
+                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
                 "dynamic_options": true
-              },
-              {
-                "key": "anime_movies_library_manual",
-                "label": "Anime movies library (manual name)",
-                "description": "Only if the list above is empty because the API key cannot read Scryer's libraries: type the exact library name.",
-                "control": "ADMIN_FORM_CONTROL_TEXT",
-                "placeholder": "Anime Movies"
               },
               {
                 "key": "series_monitor_type",

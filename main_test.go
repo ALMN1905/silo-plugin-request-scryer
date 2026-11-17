@@ -18,7 +18,7 @@ func TestManifestLoadsWithServerForm(t *testing.T) {
 			keys = append(keys, f.GetKey())
 		}
 	}
-	if len(keys) != 3 || keys[0] != "anime_movies_library" || keys[1] != "anime_movies_library_manual" || keys[2] != "series_monitor_type" {
+	if len(keys) != 2 || keys[0] != "anime_movies_library" || keys[1] != "series_monitor_type" {
 		t.Fatalf("form fields = %v", keys)
 	}
 }
