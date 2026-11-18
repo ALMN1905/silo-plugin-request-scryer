@@ -79,10 +79,22 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 
-	input := addTitleInput(req.GetRequest(), seriesMonitorType(conn))
+	d := req.GetRequest()
+	series := d.GetMediaType() == "series"
+	// A series request names the seasons wanted; one without any (TMDB lists no
+	// aired season yet) asks for the whole series.
+	seasons := d.GetSeasons()
+	whole := series && len(seasons) == 0
+	input := addTitleInput(d, seriesMonitorType(conn))
+	if series && !whole {
+		// The seasons are switched on once the title exists, so it is added
+		// unmonitored and without monitor options (see MonitorSeasons).
+		input.Monitored = false
+		input.Options = nil
+	}
 	var gqlErr *scryer.GraphQLError
 	var libraryNote string
-	if choice := animeMovieLibrary(conn); choice != "" && isAnimeMovie(req.GetRequest()) {
+	if choice := animeMovieLibrary(conn); choice != "" && isAnimeMovie(d) {
 		id, err := client.LibraryID(ctx, "MOVIE", choice)
 		switch {
 		case err == nil:
@@ -96,12 +108,36 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			return nil, err
 		}
 	}
+	failed := func(titleID, message string) *pluginv1.FulfillResponse {
+		for _, q := range qualities {
+			resp.Targets = append(resp.Targets, target(q, titleID, statusFailed, message))
+		}
+		return resp
+	}
+
+	// The monitor type options of a whole-series add would replace the settings
+	// of a title Scryer already has, so such a title is looked for first and left
+	// as it is.
+	if whole {
+		id, err := client.FindTitle(ctx, input.Facet, d.GetExternalIds()["tmdb"])
+		switch {
+		case errors.As(err, &gqlErr):
+			return failed("", "Scryer could not look the title up: "+gqlErr.Error()), nil
+		case err != nil:
+			return nil, err
+		case id != "":
+			for _, q := range qualities {
+				resp.Targets = append(resp.Targets, target(q, id, statusQueued, "Already in Scryer; nothing to change."))
+			}
+			return resp, nil
+		}
+	}
 
 	// Scryer refuses a tag that is not defined, so define the tags first. A
 	// tag Scryer will not define is left off and the others are still used;
 	// Scryer being unreachable retries the request instead, so the title is
 	// not added untagged for good.
-	tags := requestTags(conn, req.GetRequest())
+	tags := requestTags(conn, d)
 	var tagNote string
 	if len(tags) > 0 {
 		use, dropped, err := client.EnsureTags(ctx, tags)
@@ -115,24 +151,76 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	}
 	input.Tags = append(input.Tags, tags...)
 
-	titleID, err := client.AddTitle(ctx, input)
+	added, err := client.AddTitle(ctx, input)
 	switch {
 	case errors.As(err, &gqlErr):
-		for _, q := range qualities {
-			resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Scryer could not add it: "+gqlErr.Error()))
-		}
-		return resp, nil
+		return failed("", "Scryer could not add it: "+gqlErr.Error()), nil
 	case err != nil:
 		return nil, err
 	}
+	titleID := added.ID
+
+	// changed: the plugin changed something in Scryer, so the title is tagged
+	// and searched. A new title is a change; for one Scryer already had it only
+	// counts when the plugin had to switch something on.
+	changed := !added.Reused
+	hasFile := false
+	switch {
+	case !series && added.Reused:
+		// A movie Scryer already has is left alone when it has a file; without
+		// one it has to be monitored, or the request would never download.
+		title, err := client.Title(ctx, titleID)
+		switch {
+		case err != nil:
+			return nil, err
+		case title == nil:
+			return failed(titleID, "The title was removed from Scryer."), nil
+		case len(title.MediaFiles) > 0:
+			hasFile = true
+		case !title.Monitored:
+			if err := client.SetTitleMonitored(ctx, titleID); err != nil {
+				if errors.As(err, &gqlErr) {
+					return failed(titleID, "Scryer could not monitor it: "+gqlErr.Error()), nil
+				}
+				return nil, err
+			}
+			changed = true
+		}
+	case series && !whole:
+		switched, err := client.MonitorSeasons(ctx, titleID, seasons, !added.Reused)
+		switch {
+		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrSeasonNotFound):
+			return failed(titleID, "Scryer could not monitor the seasons: "+err.Error()), nil
+		case err != nil:
+			return nil, err // Silo retries the request
+		}
+		changed = changed || switched
+	}
+
+	// Scryer ignores the tags of an addTitle that finds the title already in the
+	// library, so a title the plugin changed is tagged afterwards.
+	if added.Reused && changed && len(tags) > 0 {
+		if err := client.UpdateTitleTags(ctx, titleID, tags); err != nil {
+			tagNote = " Not tagged: " + err.Error() + "."
+		}
+	}
 
 	message := "Added to Scryer; searching for a release."
-	if err := client.Search(ctx, titleID); err != nil {
-		// The title is monitored, so Scryer's RSS sync still finds it.
-		message = "Added to Scryer, but the search did not start; Scryer will pick it up from its RSS sync."
+	switch {
+	case added.Reused && changed:
+		message = "Monitored in Scryer; searching for a release."
+	case added.Reused && series, added.Reused && hasFile:
+		message = "Already in Scryer; nothing to change."
+	case added.Reused:
+		message = "Already in Scryer; searching for a release."
 	}
-	message += libraryNote
-	message += tagNote
+	if !added.Reused || changed || (added.Reused && !series && !hasFile) {
+		if err := client.Search(ctx, titleID); err != nil {
+			// The title is monitored, so Scryer's RSS sync still finds it.
+			message = "Added to Scryer, but the search did not start; Scryer will pick it up from its RSS sync."
+		}
+	}
+	message += libraryNote + tagNote
 	for _, q := range qualities {
 		resp.Targets = append(resp.Targets, target(q, titleID, statusQueued, message))
 	}
@@ -313,20 +401,43 @@ func (r *Router) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 			}
 			titles[key] = title
 		}
-		r.describe(st, title)
+		var seasons []int32
+		if d := req.GetRequest(); d.GetMediaType() == "series" {
+			seasons = d.GetSeasons()
+		}
+		r.describe(st, title, seasons)
 		resp.Statuses = append(resp.Statuses, st)
 	}
 	return resp, nil
 }
 
-func (r *Router) describe(st *pluginv1.TargetStatus, title *scryer.Title) {
+// seasonsHaveFiles reports whether every requested season has at least one
+// file in Scryer.
+func seasonsHaveFiles(title *scryer.Title, seasons []int32) bool {
+	for _, n := range seasons {
+		owned := false
+		for _, col := range title.Collections {
+			if col.Index == strconv.Itoa(int(n)) && col.EpisodesOwned != nil && *col.EpisodesOwned > 0 {
+				owned = true
+			}
+		}
+		if !owned {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *Router) describe(st *pluginv1.TargetStatus, title *scryer.Title, seasons []int32) {
 	switch {
 	case title == nil:
 		st.Status, st.Message = statusFailed, "The title was removed from Scryer."
 	case progressOf(title.Queue, r.now()) != nil:
 		st.Status = statusDownloading
 		st.Progress = progressOf(title.Queue, r.now())
-	case len(title.MediaFiles) > 0:
+	case len(seasons) > 0 && seasonsHaveFiles(title, seasons):
+		st.Status = statusCompleted
+	case len(seasons) == 0 && len(title.MediaFiles) > 0:
 		st.Status = statusCompleted
 	case !title.Monitored:
 		st.Status = statusQueued

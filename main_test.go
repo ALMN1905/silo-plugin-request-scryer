@@ -22,3 +22,15 @@ func TestManifestLoadsWithServerForm(t *testing.T) {
 		t.Fatalf("form fields = %v", keys)
 	}
 }
+
+// Silo offers more seasons of a series it already has only to a plugin that
+// declares it takes seasons.
+func TestManifestDeclaresSeasonSupport(t *testing.T) {
+	m, err := publicmanifest.Load(manifestJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.GetCapabilities()[0].GetRequestRouter().GetSupportsSeasons() {
+		t.Fatal("supports_seasons = false")
+	}
+}

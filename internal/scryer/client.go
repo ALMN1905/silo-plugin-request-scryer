@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -68,12 +70,42 @@ type QueueItem struct {
 	RemainingSeconds *int   `json:"remainingSeconds"`
 }
 
+// Collection is a season (or the specials) of a series in Scryer.
+type Collection struct {
+	ID            string `json:"id"`
+	Type          string `json:"collectionType"`  // SEASON, SPECIALS, MOVIE, ARC
+	Index         string `json:"collectionIndex"` // the season number, "0" for specials
+	Monitored     bool   `json:"monitored"`
+	EpisodesOwned *int   `json:"episodesOwned"`
+
+	// Monitored episodes and all episodes of the season; nil when Scryer has none to count.
+	EpisodesMonitored *int `json:"episodesMonitored"`
+	EpisodesTotal     *int `json:"episodesTotal"`
+
+	Episodes []Episode `json:"episodes"`
+}
+
+// Episode is one episode of a season, with whether Scryer has a file for it.
+type Episode struct {
+	ID         string     `json:"id"`
+	Monitored  bool       `json:"monitored"`
+	MediaFiles []struct{} `json:"mediaFiles"`
+}
+
+// unmonitoredEpisodes reports whether some episodes of the season are not
+// monitored: a season can be switched on with all its episodes off, which is
+// how a monitor policy such as future episodes leaves a finished season.
+func (c Collection) unmonitoredEpisodes() bool {
+	return c.EpisodesMonitored != nil && c.EpisodesTotal != nil && *c.EpisodesMonitored < *c.EpisodesTotal
+}
+
 // Title is the state of one title in Scryer.
 type Title struct {
-	ID         string      `json:"id"`
-	Monitored  bool        `json:"monitored"`
-	MediaFiles []struct{}  `json:"mediaFiles"`
-	Queue      []QueueItem `json:"downloadQueueItems"`
+	ID          string       `json:"id"`
+	Monitored   bool         `json:"monitored"`
+	MediaFiles  []struct{}   `json:"mediaFiles"`
+	Queue       []QueueItem  `json:"downloadQueueItems"`
+	Collections []Collection `json:"collections"`
 }
 
 // Me checks the API key; it fails with ErrUnauthorized when Scryer refuses it.
@@ -132,24 +164,33 @@ func (c *Client) LibraryID(ctx context.Context, facet, id string) (string, error
 	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, id)
 }
 
-// AddTitle creates the title, or reuses it when Scryer already has it, and
-// returns its ID.
-func (c *Client) AddTitle(ctx context.Context, in AddTitle) (string, error) {
+// AddedTitle is the result of AddTitle.
+type AddedTitle struct {
+	ID string
+	// Reused is true when Scryer already had the title: it is then not new, so
+	// its seasons are already loaded and its other seasons are left alone.
+	Reused bool
+}
+
+// AddTitle creates the title, or reuses it when Scryer already has it in the
+// target library, and returns its ID.
+func (c *Client) AddTitle(ctx context.Context, in AddTitle) (AddedTitle, error) {
 	var out struct {
 		AddTitle struct {
 			Title struct {
 				ID string `json:"id"`
 			} `json:"title"`
+			Reused bool `json:"reusedExistingTitle"`
 		} `json:"addTitle"`
 	}
 	const q = `mutation SiloAddTitle($input: AddTitleInput!) { addTitle(input: $input) { title { id } reusedExistingTitle } }`
 	if err := c.do(ctx, q, map[string]any{"input": in}, &out); err != nil {
-		return "", err
+		return AddedTitle{}, err
 	}
 	if out.AddTitle.Title.ID == "" {
-		return "", errors.New("scryer returned no title id")
+		return AddedTitle{}, errors.New("scryer returned no title id")
 	}
-	return out.AddTitle.Title.ID, nil
+	return AddedTitle{ID: out.AddTitle.Title.ID, Reused: out.AddTitle.Reused}, nil
 }
 
 // EnsureTags makes sure each label is defined in Scryer's title-tag registry
@@ -214,6 +255,56 @@ func (c *Client) tagDefinitions(ctx context.Context) (map[string]string, error) 
 	return have, nil
 }
 
+// UpdateTitleTags adds already defined tags to a title.
+func (c *Client) UpdateTitleTags(ctx context.Context, titleID string, add []string) error {
+	const q = `mutation SiloTagTitle($input: UpdateTitleTagsInput!) { updateTitleTags(input: $input) { id } }`
+	return c.do(ctx, q, map[string]any{"input": map[string]any{"titleIds": []string{titleID}, "add": add}}, &struct{}{})
+}
+
+// SetTitleMonitored switches a title on.
+func (c *Client) SetTitleMonitored(ctx context.Context, titleID string) error {
+	const q = `mutation SiloMonitorTitle($input: SetTitleMonitoredInput!) { setTitleMonitored(input: $input) { id } }`
+	return c.do(ctx, q, map[string]any{"input": map[string]any{"titleId": titleID, "monitored": true}}, &struct{}{})
+}
+
+// FindTitle returns the id of the title of the facet with this TMDB id that
+// Scryer already has, or "". Scryer's title list cannot be filtered by external
+// id, so it is read page by page.
+func (c *Client) FindTitle(ctx context.Context, facet, tmdbID string) (string, error) {
+	if tmdbID == "" {
+		return "", nil
+	}
+	const page = 200
+	for offset := 0; ; offset += page {
+		var out struct {
+			Titles struct {
+				Items []struct {
+					ID          string `json:"id"`
+					ExternalIDs []struct {
+						Source string `json:"source"`
+						Value  string `json:"value"`
+					} `json:"externalIds"`
+				} `json:"items"`
+				HasMore bool `json:"hasMore"`
+			} `json:"titles"`
+		}
+		const q = `query SiloFind($facet: MediaFacetValue, $limit: Int, $offset: Int) { titles(facet: $facet, limit: $limit, offset: $offset) { items { id externalIds { source value } } hasMore } }`
+		if err := c.do(ctx, q, map[string]any{"facet": facet, "limit": page, "offset": offset}, &out); err != nil {
+			return "", err
+		}
+		for _, t := range out.Titles.Items {
+			for _, e := range t.ExternalIDs {
+				if e.Source == "tmdb" && e.Value == tmdbID {
+					return t.ID, nil
+				}
+			}
+		}
+		if !out.Titles.HasMore {
+			return "", nil
+		}
+	}
+}
+
 // Search starts Scryer's automatic search for a title.
 func (c *Client) Search(ctx context.Context, titleID string) error {
 	const q = `mutation SiloSearch($input: TriggerAcquisitionSearchInput!) { triggerAcquisitionSearch(input: $input) { id } }`
@@ -226,11 +317,130 @@ func (c *Client) Title(ctx context.Context, id string) (*Title, error) {
 	var out struct {
 		Title *Title `json:"title"`
 	}
-	const q = `query SiloTitle($id: ID!) { title(id: $id) { id monitored mediaFiles { id } downloadQueueItems(includeImportActivity: true) { displayState progressPercent sizeBytes remainingSeconds } } }`
+	const q = `query SiloTitle($id: ID!) { title(id: $id) { id monitored mediaFiles { id } collections { collectionType collectionIndex monitored episodesOwned } downloadQueueItems(includeImportActivity: true) { displayState progressPercent sizeBytes remainingSeconds } } }`
 	if err := c.do(ctx, q, map[string]any{"id": id}, &out); err != nil {
 		return nil, err
 	}
 	return out.Title, nil
+}
+
+// ErrSeasonNotFound means the title has no season with the requested number.
+var ErrSeasonNotFound = errors.New("scryer has no such season")
+
+// SeasonPoll is how long MonitorSeasons waits between reads of a title that has
+// just been created, while Scryer is still loading its seasons.
+var SeasonPoll = 2 * time.Second
+
+// seasonPolls is how many times it reads before giving up on a new title.
+const seasonPolls = 10
+
+// collections reads a title's seasons with their episodes. For a title the
+// plugin has just created Scryer loads them a few seconds after addTitle
+// returns, so they are read again until the requested ones are there.
+func (c *Client) collections(ctx context.Context, titleID string, seasons []int32, newTitle bool) ([]Collection, error) {
+	for attempt := 0; ; attempt++ {
+		var out struct {
+			Title *struct {
+				Collections []Collection `json:"collections"`
+			} `json:"title"`
+		}
+		const q = `query SiloSeasons($id: ID!) { title(id: $id) { collections { id collectionType collectionIndex monitored episodesMonitored episodesTotal episodes { id monitored mediaFiles { id } } } } }`
+		if err := c.do(ctx, q, map[string]any{"id": titleID}, &out); err != nil {
+			return nil, err
+		}
+		if out.Title == nil {
+			return nil, fmt.Errorf("%w: the title is gone", ErrSeasonNotFound)
+		}
+		if !newTitle || attempt >= seasonPolls || loaded(out.Title.Collections, seasons) {
+			return out.Title.Collections, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(SeasonPoll):
+		}
+	}
+}
+
+// MonitorSeasons makes sure the given seasons of a title will be downloaded and
+// reports whether it had to change anything.
+//
+// A new title (newTitle) has nothing yet, so each requested season is switched
+// on with all its episodes. In a title Scryer already had, only the episodes
+// that have no file and are not monitored are switched on, one by one: the rest
+// is already managed and is left as it is. Monitoring an episode also switches
+// on its season and its title.
+//
+// Scryer's addTitle options are not used for any of this: on a title Scryer
+// already has they replace its stored monitor type and clear its season
+// selection.
+func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []int32, newTitle bool) (bool, error) {
+	cols, err := c.collections(ctx, titleID, seasons, newTitle)
+	if err != nil {
+		return false, err
+	}
+	// Every season is looked for before anything is changed, so a missing one
+	// leaves the title as it was.
+	var wanted []Collection
+	for _, n := range seasons {
+		i := slices.IndexFunc(cols, func(col Collection) bool {
+			return col.Index == strconv.Itoa(int(n)) && (col.Type == "SEASON" || col.Type == "SPECIALS")
+		})
+		if i < 0 {
+			return false, fmt.Errorf("%w: season %d", ErrSeasonNotFound, n)
+		}
+		wanted = append(wanted, cols[i])
+	}
+	changed := false
+	for _, col := range wanted {
+		switch {
+		case newTitle:
+			if col.Monitored && !col.unmonitoredEpisodes() {
+				continue
+			}
+			if err := c.setCollectionMonitored(ctx, col.ID, true); err != nil {
+				return changed, err
+			}
+			changed = true
+		default:
+			for _, e := range col.Episodes {
+				if len(e.MediaFiles) > 0 || e.Monitored {
+					continue
+				}
+				const set = `mutation SiloMonitorEpisode($input: SetEpisodeMonitoredInput!) { setEpisodeMonitored(input: $input) { __typename } }`
+				if err := c.do(ctx, set, map[string]any{"input": map[string]any{"episodeId": e.ID, "monitored": true}}, &struct{}{}); err != nil {
+					return changed, err
+				}
+				changed = true
+			}
+		}
+	}
+	return changed, nil
+}
+
+func (c *Client) setCollectionMonitored(ctx context.Context, id string, monitored bool) error {
+	const set = `mutation SiloMonitorSeason($input: SetCollectionMonitoredInput!) { setCollectionMonitored(input: $input) { __typename } }`
+	return c.do(ctx, set, map[string]any{"input": map[string]any{"collectionId": id, "monitored": monitored}}, &struct{}{})
+}
+
+// loaded reports whether Scryer has loaded the title's seasons: some are there,
+// and every requested one is among them.
+func loaded(collections []Collection, seasons []int32) bool {
+	if len(collections) == 0 {
+		return false
+	}
+	for _, n := range seasons {
+		found := false
+		for _, col := range collections {
+			if col.Index == strconv.Itoa(int(n)) {
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) do(ctx context.Context, query string, vars map[string]any, out any) error {

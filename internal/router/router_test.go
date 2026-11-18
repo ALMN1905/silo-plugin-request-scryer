@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,10 +12,14 @@ import (
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"google.golang.org/protobuf/types/known/structpb"
+
+	"github.com/neilmc78/silo-plugin-request-scryer/internal/scryer"
 )
 
-// fakeScryer answers the plugin's GraphQL operations and records the last
-// addTitle input.
+func init() { scryer.SeasonPoll = time.Millisecond }
+
+// fakeScryer answers the plugin's GraphQL operations and records what it was
+// asked to change.
 type fakeScryer struct {
 	t         *testing.T
 	added     map[string]any
@@ -25,10 +30,20 @@ type fakeScryer struct {
 	libsErr   string // makes the libraries query fail
 	libsQuery string // the last libraries query sent
 
+	reused bool             // addTitle answers that it found the title
+	titles []map[string]any // the library, for the lookup by TMDB id
+
+	collectionCalls []string // "id:monitored" sent to setCollectionMonitored
+	episodeCalls    []string // ids sent to setEpisodeMonitored
+	titleCalls      []string // ids sent to setTitleMonitored
+	hydrateAfter    int      // title reads that answer without collections, like a title Scryer is still loading
+	reads           int
+
 	tagDefs       []string // labels already in the tag registry
 	tagCreateErr  string   // makes creating a tag definition fail
 	tagCreateRace bool     // another request defines the tag just first: create fails, the label exists
 	tagsDown      bool     // the tag list answers 503, as when Scryer is restarting
+	tagged        []string // labels sent to updateTitleTags
 }
 
 func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +62,8 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		f.t.Fatal(err)
 	}
+	reply := func(data map[string]any) { _ = json.NewEncoder(w).Encode(map[string]any{"data": data}) }
+	input := func() map[string]any { return body.Variables["input"].(map[string]any) }
 	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case strings.Contains(body.Query, "addTitle"):
@@ -54,8 +71,22 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.addError}}})
 			return
 		}
-		f.added = body.Variables["input"].(map[string]any)
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}, "reusedExistingTitle": false}}})
+		f.added = input()
+		reply(map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}, "reusedExistingTitle": f.reused}})
+	case strings.Contains(body.Query, "setCollectionMonitored"):
+		f.collectionCalls = append(f.collectionCalls, fmt.Sprintf("%s:%v", input()["collectionId"], input()["monitored"]))
+		reply(map[string]any{"setCollectionMonitored": map[string]any{"__typename": "SetCollectionMonitoredPayload"}})
+	case strings.Contains(body.Query, "setEpisodeMonitored"):
+		f.episodeCalls = append(f.episodeCalls, input()["episodeId"].(string))
+		reply(map[string]any{"setEpisodeMonitored": map[string]any{"__typename": "EpisodePayload"}})
+	case strings.Contains(body.Query, "setTitleMonitored"):
+		f.titleCalls = append(f.titleCalls, input()["titleId"].(string))
+		reply(map[string]any{"setTitleMonitored": map[string]any{"id": "t1"}})
+	case strings.Contains(body.Query, "updateTitleTags"):
+		for _, l := range input()["add"].([]any) {
+			f.tagged = append(f.tagged, l.(string))
+		}
+		reply(map[string]any{"updateTitleTags": []map[string]any{{"id": "t1"}}})
 	case strings.Contains(body.Query, "titleTagDefinitions") && f.tagsDown:
 		w.WriteHeader(http.StatusServiceUnavailable)
 	case strings.Contains(body.Query, "titleTagDefinitions"):
@@ -63,7 +94,7 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for _, l := range f.tagDefs {
 			defs = append(defs, map[string]string{"label": l})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"titleTagDefinitions": defs}})
+		reply(map[string]any{"titleTagDefinitions": defs})
 	case strings.Contains(body.Query, "createTitleTagDefinition"):
 		if f.tagCreateRace {
 			f.tagDefs = append(f.tagDefs, body.Variables["input"].(map[string]any)["label"].(string))
@@ -74,25 +105,39 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.tagCreateErr}}})
 			return
 		}
-		f.tagDefs = append(f.tagDefs, body.Variables["input"].(map[string]any)["label"].(string))
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"createTitleTagDefinition": map[string]any{"__typename": "TitleTagDefinitionMutationPayload"}}})
+		f.tagDefs = append(f.tagDefs, input()["label"].(string))
+		reply(map[string]any{"createTitleTagDefinition": map[string]any{"__typename": "TitleTagDefinitionMutationPayload"}})
 	case strings.Contains(body.Query, "libraries("):
 		f.libsQuery = body.Query
 		if f.libsErr != "" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.libsErr}}})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"libraries": f.libs}})
+		reply(map[string]any{"libraries": f.libs})
+	case strings.Contains(body.Query, "SiloFind"):
+		items := f.titles
+		if items == nil {
+			items = []map[string]any{}
+		}
+		reply(map[string]any{"titles": map[string]any{"items": items, "hasMore": false}})
 	case strings.Contains(body.Query, "triggerAcquisitionSearch"):
 		f.searches++
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"triggerAcquisitionSearch": map[string]any{"id": "job"}}})
+		reply(map[string]any{"triggerAcquisitionSearch": map[string]any{"id": "job"}})
 	case strings.Contains(body.Query, "title(id"):
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"title": f.title}})
+		title := f.title
+		if f.reads++; title != nil && f.reads <= f.hydrateAfter {
+			loading := map[string]any{}
+			for k, v := range title {
+				loading[k] = v
+			}
+			loading["collections"] = []any{}
+			title = loading
+		}
+		reply(map[string]any{"title": title})
 	case strings.Contains(body.Query, "me {"):
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"me": map[string]any{"id": "u1"}}})
+		reply(map[string]any{"me": map[string]any{"id": "u1"}})
 	}
 }
-
 func newTestRouter(t *testing.T, fake *fakeScryer) (*Router, *pluginv1.RouterConnection) {
 	t.Helper()
 	fake.t = t
@@ -100,7 +145,9 @@ func newTestRouter(t *testing.T, fake *fakeScryer) (*Router, *pluginv1.RouterCon
 	t.Cleanup(srv.Close)
 	r := New()
 	r.now = func() time.Time { return time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC) }
-	return r, &pluginv1.RouterConnection{Id: "c1", BaseUrl: srv.URL + "/", ApiKey: "ska_good"}
+	conn := &pluginv1.RouterConnection{Id: "c1", BaseUrl: srv.URL + "/", ApiKey: "ska_good"}
+	withConfig(t, conn, nil)
+	return r, conn
 }
 
 func TestFulfillAddsAMonitoredTitleAndSearches(t *testing.T) {
@@ -222,6 +269,7 @@ func TestTestConnectionReportsARefusedKey(t *testing.T) {
 	}
 }
 
+// withConfig sets the connection's settings.
 func withConfig(t *testing.T, conn *pluginv1.RouterConnection, cfg map[string]any) {
 	t.Helper()
 	st, err := structpb.NewStruct(cfg)
@@ -364,11 +412,7 @@ func TestSeriesAndAnimeSendOnlyAChosenMonitorType(t *testing.T) {
 			fake := &fakeScryer{}
 			r, conn := newTestRouter(t, fake)
 			if tc.cfg != nil {
-				st, err := structpb.NewStruct(tc.cfg)
-				if err != nil {
-					t.Fatal(err)
-				}
-				conn.Config = st
+				withConfig(t, conn, tc.cfg)
 			}
 			if _, err := r.Fulfill(context.Background(), &pluginv1.FulfillRequest{
 				Request:     tc.d,
@@ -417,12 +461,289 @@ func TestAnimeMovieLibraryLookupRetriesWhenScryerIsUnreachable(t *testing.T) {
 	}
 }
 
+// season builds a season of n episodes, the first owned of them with a file and
+// the first on of them monitored, ids <id>e1, <id>e2...; first is the air date of
+// every episode.
+func season(id, kind, index string, flag bool, n, owned, on int, first string) map[string]any {
+	eps := []any{}
+	for i := 1; i <= n; i++ {
+		files := []any{}
+		if i <= owned {
+			files = append(files, map[string]any{"id": "f"})
+		}
+		eps = append(eps, map[string]any{"id": fmt.Sprintf("%se%d", id, i), "monitored": i <= on, "mediaFiles": files, "airDate": first})
+	}
+	return map[string]any{"id": id, "collectionType": kind, "collectionIndex": index, "monitored": flag,
+		"episodesOwned": owned, "episodesMonitored": on, "episodesTotal": n, "episodes": eps}
+}
+
+func seasonTitle(collections ...map[string]any) map[string]any {
+	list := []any{}
+	for _, c := range collections {
+		list = append(list, c)
+	}
+	return map[string]any{"id": "t1", "monitored": true, "mediaFiles": []any{map[string]any{"id": "f"}}, "downloadQueueItems": []any{}, "collections": list}
+}
+
+func movieTitle(monitored, file bool) map[string]any {
+	files := []any{}
+	if file {
+		files = append(files, map[string]any{"id": "f"})
+	}
+	return map[string]any{"id": "t1", "monitored": monitored, "mediaFiles": files, "downloadQueueItems": []any{}}
+}
+
+func seasonRequest(seasons ...int32) *pluginv1.RequestDescriptor {
+	return &pluginv1.RequestDescriptor{MediaType: "series", Title: "Show", Seasons: seasons, ExternalIds: map[string]string{"tvdb": "259675"}}
+}
+
+func calls(list []string) string { return strings.Join(list, ",") }
+
 func tagsOf(added map[string]any) []string {
 	var out []string
 	for _, t := range added["tags"].([]any) {
 		out = append(out, t.(string))
 	}
 	return out
+}
+
+func targetMessage(t *testing.T, resp *pluginv1.FulfillResponse) string {
+	t.Helper()
+	if len(resp.GetTargets()) != 1 {
+		t.Fatalf("targets = %v", resp.GetTargets())
+	}
+	return resp.GetTargets()[0].GetMessage()
+}
+
+// A request ends in a download unless the content already exists: a new movie
+// is added monitored, one Scryer has with a file is left alone, and one without a
+// file is switched on if it is not monitored.
+func TestMovieRequests(t *testing.T) {
+	d := &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana", ExternalIds: map[string]string{"tmdb": "348"}}
+	for name, tc := range map[string]struct {
+		reused    bool
+		title     map[string]any
+		searches  int
+		monitored string
+		tagged    string
+		message   string
+	}{
+		"new":                               {false, nil, 1, "", "", "Added to Scryer"},
+		"existing with a file":              {true, movieTitle(false, true), 0, "", "", "Already in Scryer; nothing to change."},
+		"existing monitored without a file": {true, movieTitle(true, false), 1, "", "", "Already in Scryer; searching"},
+		"existing unmonitored, no file":     {true, movieTitle(false, false), 1, "t1", "silo-request,silo-user-ana", "Monitored in Scryer"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: tc.reused, title: tc.title}
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, map[string]any{configTagTitles: true})
+			resp, err := fulfill(t, r, conn, d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.searches != tc.searches || calls(fake.titleCalls) != tc.monitored || calls(fake.tagged) != tc.tagged {
+				t.Fatalf("searches %d, monitored %q, tagged %q", fake.searches, calls(fake.titleCalls), calls(fake.tagged))
+			}
+			if got := targetMessage(t, resp); !strings.HasPrefix(got, tc.message) {
+				t.Fatalf("message = %q", got)
+			}
+		})
+	}
+}
+
+// A new title is added unmonitored and without options (a monitor type chosen
+// for whole series must not reach it), then each requested season is switched
+// on with all its episodes. What Scryer decided for the specials stays.
+func TestRequestedSeasonsOfANewTitle(t *testing.T) {
+	fake := &fakeScryer{title: seasonTitle(
+		season("sp", "SPECIALS", "0", true, 2, 0, 2, ""),
+		season("s1", "SEASON", "1", false, 3, 0, 0, ""),
+		season("s2", "SEASON", "2", false, 3, 0, 0, ""),
+		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
+	)}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configSeriesMonitorType: "ALL_EPISODES", configTagTitles: true})
+	d := seasonRequest(2, 3)
+	d.RequesterUsername = "ana"
+	if _, err := fulfill(t, r, conn, d); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fake.added["options"]; ok || fake.added["monitored"] != false {
+		t.Fatalf("addTitle input = %v", fake.added)
+	}
+	if got := calls(fake.collectionCalls); got != "s2:true,s3:true" || len(fake.episodeCalls) != 0 {
+		t.Fatalf("collection calls = %q, episode calls = %v", got, fake.episodeCalls)
+	}
+	if got := calls(tagsOf(fake.added)); got != "silo-request,silo-user-ana" || len(fake.tagged) != 0 {
+		t.Fatalf("tags in the add = %q, tagged afterwards = %v", got, fake.tagged)
+	}
+	if fake.searches != 1 {
+		t.Fatalf("searches = %d", fake.searches)
+	}
+}
+
+// Scryer loads a new title's seasons a few seconds after addTitle returns.
+func TestRequestedSeasonsOfANewTitleWaitForScryerToLoadThem(t *testing.T) {
+	fake := &fakeScryer{hydrateAfter: 3, title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))}
+	r, conn := newTestRouter(t, fake)
+	resp, err := fulfill(t, r, conn, seasonRequest(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(fake.collectionCalls); got != "s1:true" || resp.GetTargets()[0].GetStatus() != statusQueued {
+		t.Fatalf("collection calls = %q, targets = %v", got, resp.GetTargets())
+	}
+}
+
+// A season Scryer switched on with none of its episodes monitored (a "future
+// episodes" policy on a finished season) downloads nothing until its episodes
+// are on too.
+func TestNewTitleSeasonSwitchedOnWithoutMonitoredEpisodesIsMonitored(t *testing.T) {
+	fake := &fakeScryer{title: seasonTitle(
+		season("s1", "SEASON", "1", true, 12, 0, 0, ""),
+		season("s2", "SEASON", "2", true, 12, 0, 12, ""),
+	)}
+	r, conn := newTestRouter(t, fake)
+	if _, err := fulfill(t, r, conn, seasonRequest(1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(fake.collectionCalls); got != "s1:true" {
+		t.Fatalf("collection calls = %q, want only s1", got)
+	}
+}
+
+// In a title Scryer already has, only the episodes of the requested seasons that
+// have no file and are not monitored are switched on, one by one. Specials, the
+// other seasons, files and monitored episodes are left as they are.
+func TestRequestedSeasonsOfAnExistingTitleSwitchOnOnlyWhatIsMissing(t *testing.T) {
+	fake := &fakeScryer{reused: true, title: seasonTitle(
+		season("sp", "SPECIALS", "0", false, 2, 0, 0, ""),
+		season("s1", "SEASON", "1", true, 4, 2, 0, ""), // e1, e2 have files, e3 and e4 are missing
+		season("s2", "SEASON", "2", true, 3, 3, 0, ""), // complete
+		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
+	)}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesMonitorType: "ALL_EPISODES"})
+	d := seasonRequest(1, 2)
+	d.RequesterUsername = "ana"
+	resp, err := fulfill(t, r, conn, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(fake.episodeCalls); got != "s1e3,s1e4" || len(fake.collectionCalls) != 0 {
+		t.Fatalf("episode calls = %q, collection calls = %v", got, fake.collectionCalls)
+	}
+	if calls(fake.tagged) != "silo-request,silo-user-ana" || fake.searches != 1 || !strings.HasPrefix(targetMessage(t, resp), "Monitored in Scryer") {
+		t.Fatalf("tagged %v, searches %d, message %q", fake.tagged, fake.searches, targetMessage(t, resp))
+	}
+}
+
+// Nothing to switch on: no change, no tag, no search.
+func TestRequestedSeasonsAlreadyOwnedOrMonitoredChangeNothing(t *testing.T) {
+	fake := &fakeScryer{reused: true, title: seasonTitle(
+		season("s1", "SEASON", "1", true, 4, 2, 0, ""),
+		season("s2", "SEASON", "2", true, 3, 3, 0, ""),
+	)}
+	fake.title["collections"].([]any)[0].(map[string]any)["episodes"] = []any{
+		map[string]any{"id": "a", "monitored": false, "mediaFiles": []any{map[string]any{"id": "f"}}},
+		map[string]any{"id": "b", "monitored": true, "mediaFiles": []any{}},
+	}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	resp, err := fulfill(t, r, conn, seasonRequest(1, 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.episodeCalls)+len(fake.collectionCalls)+len(fake.tagged)+fake.searches != 0 {
+		t.Fatalf("episodes %v, collections %v, tagged %v, searches %d", fake.episodeCalls, fake.collectionCalls, fake.tagged, fake.searches)
+	}
+	if got := targetMessage(t, resp); got != "Already in Scryer; nothing to change." {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+// A season Scryer does not have fails the target, and nothing is changed, not
+// even the seasons that could have been.
+func TestRequestedSeasonMissingInScryerFailsTheTarget(t *testing.T) {
+	for name, reused := range map[string]bool{"new title": false, "existing title": true} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: reused, title: seasonTitle(season("s1", "SEASON", "1", false, 3, 0, 0, ""))}
+			r, conn := newTestRouter(t, fake)
+			resp, err := fulfill(t, r, conn, seasonRequest(1, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := resp.GetTargets()
+			if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "season 5") {
+				t.Fatalf("targets = %v", got)
+			}
+			if len(fake.collectionCalls)+len(fake.episodeCalls) != 0 {
+				t.Fatalf("changed: collections %v, episodes %v", fake.collectionCalls, fake.episodeCalls)
+			}
+		})
+	}
+}
+
+// A series that has not aired yet has no seasons to name: it is requested whole,
+// with the monitor type the admin chose. One Scryer already has is looked up first
+// and left alone, since the options of an add would replace its settings.
+func TestWholeSeriesRequest(t *testing.T) {
+	d := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Show", ExternalIds: map[string]string{"tmdb": "100", "tvdb": "1"}}
+	t.Run("new title", func(t *testing.T) {
+		fake := &fakeScryer{titles: []map[string]any{{"id": "x", "externalIds": []map[string]string{{"source": "tmdb", "value": "999"}}}}}
+		r, conn := newTestRouter(t, fake)
+		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES"})
+		if _, err := fulfill(t, r, conn, d); err != nil {
+			t.Fatal(err)
+		}
+		opts, _ := fake.added["options"].(map[string]any)
+		if fake.added["monitored"] != true || opts["monitorType"] != "FUTURE_EPISODES" || fake.searches != 1 {
+			t.Fatalf("added = %v, searches = %d", fake.added, fake.searches)
+		}
+	})
+	t.Run("title Scryer already has", func(t *testing.T) {
+		fake := &fakeScryer{titles: []map[string]any{{"id": "t9", "externalIds": []map[string]string{{"source": "tmdb", "value": "100"}}}}}
+		r, conn := newTestRouter(t, fake)
+		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES", configTagTitles: true})
+		resp, err := fulfill(t, r, conn, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := resp.GetTargets()
+		if fake.added != nil || len(fake.tagged) != 0 || fake.searches != 0 || len(got) != 1 || got[0].GetExternalId() != "t9" || got[0].GetStatus() != statusQueued {
+			t.Fatalf("added = %v, tagged = %v, searches = %d, targets = %v", fake.added, fake.tagged, fake.searches, got)
+		}
+	})
+}
+
+// A request that names seasons completes when each has a file, not when the
+// title has any.
+func TestCheckStatusCompletesOnlyWhenTheRequestedSeasonsHaveFiles(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seasons []int32
+		want    string
+	}{
+		"season 1 has files":                {[]int32{1}, statusCompleted},
+		"season 2 has none":                 {[]int32{2}, statusQueued},
+		"one of two requested has none":     {[]int32{1, 2}, statusQueued},
+		"no seasons: any file of the title": {nil, statusCompleted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			title := seasonTitle(season("s1", "SEASON", "1", true, 2, 1, 2, ""), season("s2", "SEASON", "2", true, 2, 0, 2, ""))
+			r, conn := newTestRouter(t, &fakeScryer{title: title})
+			resp, err := r.CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+				Request:     seasonRequest(tc.seasons...),
+				Targets:     []*pluginv1.TargetRef{{Quality: "1080p", ConnectionId: "c1", ExternalId: "t1"}},
+				Connections: []*pluginv1.RouterConnection{conn},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.GetStatuses()[0].GetStatus(); got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestRequestTagsAreCreatedAndSentWithANewTitle(t *testing.T) {
@@ -433,11 +754,14 @@ func TestRequestTagsAreCreatedAndSentWithANewTitle(t *testing.T) {
 	if _, err := fulfill(t, r, conn, d); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request,silo-user-ana-maria" {
+	if got := calls(tagsOf(fake.added)); got != "silo-request,silo-user-ana-maria" {
 		t.Fatalf("tags = %s", got)
 	}
 	if len(fake.tagDefs) != 2 || fake.tagDefs[1] != "silo-user-ana-maria" {
 		t.Fatalf("registry = %v, want the missing user tag created and silo-request left alone", fake.tagDefs)
+	}
+	if len(fake.tagged) != 0 {
+		t.Fatalf("a new title was tagged again: %v", fake.tagged)
 	}
 }
 
@@ -448,7 +772,7 @@ func TestRequestWithoutUsernameGetsOnlyTheCommonTag(t *testing.T) {
 	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien"}); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request" {
+	if got := calls(tagsOf(fake.added)); got != "silo-request" {
 		t.Fatalf("tags = %s", got)
 	}
 }
@@ -473,13 +797,13 @@ func TestTitleIsAddedWithoutTagsWhenTheyCannotBeCreated(t *testing.T) {
 
 // Like every setting the plugin adds, tagging does nothing until it is chosen.
 func TestTaggingIsOffByDefault(t *testing.T) {
-	fake := &fakeScryer{}
+	fake := &fakeScryer{reused: true, title: movieTitle(false, false)}
 	r, conn := newTestRouter(t, fake)
 	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(tagsOf(fake.added)) != 0 || len(fake.tagDefs) != 0 {
-		t.Fatalf("tagging happened while off: tags %v, registry %v", fake.added["tags"], fake.tagDefs)
+	if len(tagsOf(fake.added)) != 0 || len(fake.tagDefs) != 0 || len(fake.tagged) != 0 {
+		t.Fatalf("tagging happened while off: tags %v, registry %v, tagged %v", fake.added["tags"], fake.tagDefs, fake.tagged)
 	}
 }
 
