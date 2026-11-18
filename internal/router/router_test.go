@@ -623,7 +623,7 @@ func TestRequestedSeasonsOfAnExistingTitleSwitchOnOnlyWhatIsMissing(t *testing.T
 		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
 	)}
 	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesMonitorType: "ALL_EPISODES"})
+	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesSpecials: true, configSeriesMonitorType: "ALL_EPISODES"})
 	d := seasonRequest(1, 2)
 	d.RequesterUsername = "ana"
 	resp, err := fulfill(t, r, conn, d)
@@ -704,7 +704,7 @@ func TestWholeSeriesRequest(t *testing.T) {
 	t.Run("title Scryer already has", func(t *testing.T) {
 		fake := &fakeScryer{titles: []map[string]any{{"id": "t9", "externalIds": []map[string]string{{"source": "tmdb", "value": "100"}}}}}
 		r, conn := newTestRouter(t, fake)
-		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES", configTagTitles: true})
+		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES", configTagTitles: true, configSeriesSpecials: true})
 		resp, err := fulfill(t, r, conn, d)
 		if err != nil {
 			t.Fatal(err)
@@ -714,6 +714,54 @@ func TestWholeSeriesRequest(t *testing.T) {
 			t.Fatalf("added = %v, tagged = %v, searches = %d, targets = %v", fake.added, fake.tagged, fake.searches, got)
 		}
 	})
+}
+
+// The "Monitor specials of new series" switch monitors the specials of a series the
+// plugin has just added, by seasons or whole. Anime follow Scryer's own setting
+// and a title Scryer already had keeps its specials.
+func TestMonitorSpecialsOfNewSeries(t *testing.T) {
+	on := map[string]any{configSeriesSpecials: true}
+	for name, tc := range map[string]struct {
+		reused  bool
+		anime   bool
+		seasons []int32
+		cfg     map[string]any
+		sp      map[string]any
+		want    string
+	}{
+		"new series, seasons, on":      {false, false, []int32{1}, on, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), "s1:true,sp:true"},
+		"new series, seasons, off":     {false, false, []int32{1}, nil, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), "s1:true"},
+		"new series, whole, on":        {false, false, nil, on, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), "sp:true"},
+		"new series, whole, off":       {false, false, nil, nil, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), ""},
+		"new series without specials":  {false, false, nil, on, season("sp", "SPECIALS", "0", false, 0, 0, 0, ""), ""},
+		"new anime, seasons, on":       {false, true, []int32{1}, on, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), "s1:true"},
+		"new anime, whole, on":         {false, true, nil, on, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), ""},
+		"existing series, seasons, on": {true, false, []int32{1}, on, season("sp", "SPECIALS", "0", false, 4, 0, 0, ""), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// season 1 is already monitored with every episode in an existing title
+			s1 := season("s1", "SEASON", "1", false, 3, 0, 0, "")
+			if tc.reused {
+				s1 = season("s1", "SEASON", "1", true, 3, 0, 3, "")
+			}
+			fake := &fakeScryer{reused: tc.reused, title: seasonTitle(tc.sp, s1)}
+			r, conn := newTestRouter(t, fake)
+			if tc.cfg != nil {
+				withConfig(t, conn, tc.cfg)
+			}
+			d := seasonRequest(tc.seasons...)
+			d.IsAnime = tc.anime
+			if tc.seasons == nil {
+				d.ExternalIds["tmdb"] = "100"
+			}
+			if _, err := fulfill(t, r, conn, d); err != nil {
+				t.Fatal(err)
+			}
+			if got := calls(fake.collectionCalls); got != tc.want {
+				t.Fatalf("collection calls = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // A request that names seasons completes when each has a file, not when the

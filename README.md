@@ -18,7 +18,7 @@ A [Silo](https://github.com/Silo-Server/silo-server) request router that sends a
 
 Silo also completes a request on its own once the title reaches its library.
 
-A request is meant to end in a download, so what the plugin changes in Scryer is only what the request needs. A title Scryer already has keeps its settings (monitor type), and episodes that already have a file or are already monitored are left as they are.
+A request is meant to end in a download, so what the plugin changes in Scryer is only what the request needs. A title Scryer already has keeps its settings (monitor type, specials), and episodes that already have a file or are already monitored are left as they are.
 
 **Movies.** A new movie is added monitored. A movie Scryer already has is left alone when it has a file; without one, it is switched on so the request downloads.
 
@@ -27,6 +27,8 @@ A request is meant to end in a download, so what the plugin changes in Scryer is
 The plugin declares that it takes seasons (`supports_seasons`), so Silo lets a user request more seasons of a series that is already in its library.
 
 A series that has not aired yet has no seasons to name; Silo then asks for the whole series. **Series and anime monitoring** in the server's settings picks which episodes Scryer monitors for it: *Leave to Scryer* (default), *All episodes*, *Missing and future episodes* or *Future episodes only*. With *Leave to Scryer* the plugin sends no choice, and Scryer monitors every episode (it does not apply the library's default monitoring to titles added through the API). A title Scryer already has is looked up first and left as it is.
+
+**Monitor specials of new series** monitors the specials of a new series (not anime), off by default. Scryer has no setting for the specials of a series: they are never monitored, unlike anime, which follow the anime specials setting in Scryer. The switch fills that gap, and only for new series; anime and titles Scryer already has keep what Scryer says. Silo cannot request specials, so this is the admin's decision.
 
 Scryer has no anime movie catalog, so anime movies go to the default movie library unless you pick another one: in the server's settings, choose **Anime movies library** from the list of Scryer movie libraries the API key can add titles to (it needs **Manage titles** on that library). *Scryer's default movie library* leaves them where they are. The choice is kept by library id, so renaming the library in Scryer does not break it; if the library is later deleted, or Scryer refuses to list libraries, the request still goes through, to the default movie library. Scryer matches existing titles within one library, so an anime movie that is already in another movie library (the default one, say) is added again to the anime library and downloaded again.
 

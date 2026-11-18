@@ -37,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -75,6 +75,13 @@
                     "description": "Episodes that have not aired yet. No backlog download."
                   }
                 ]
+              },
+              {
+                "key": "monitor_series_specials",
+                "label": "Monitor specials of new series",
+                "description": "Scryer has no setting for the specials of series: they are never monitored, unlike anime, which follow the anime specials setting in Scryer. With \"Monitor specials of new series\" on, a new series requested from Silo gets its specials monitored (and so downloaded). Off (default): Scryer decides, so they are not. Anime always follow Scryer, and titles Scryer already has keep theirs. Silo can't request specials, so this is the admin's decision.",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false
               },
               {
                 "key": "tag_titles",

@@ -197,6 +197,18 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		changed = changed || switched
 	}
 
+	// Scryer has no setting for the specials of a series, so a new series gets
+	// them monitored only when the admin asks. Anime follow Scryer's own anime
+	// setting, and a title Scryer already had keeps its own.
+	if series && !d.GetIsAnime() && !added.Reused && monitorSeriesSpecials(conn) {
+		if err := client.MonitorSpecials(ctx, titleID); err != nil {
+			if errors.As(err, &gqlErr) {
+				return failed(titleID, "Scryer could not monitor the specials: "+gqlErr.Error()), nil
+			}
+			return nil, err
+		}
+	}
+
 	// Scryer ignores the tags of an addTitle that finds the title already in the
 	// library, so a title the plugin changed is tagged afterwards.
 	if added.Reused && changed && len(tags) > 0 {
@@ -267,6 +279,14 @@ func seriesMonitorType(conn *pluginv1.RouterConnection) string {
 		return v
 	}
 	return ""
+}
+
+// configSeriesSpecials is the connection config key of the switch that monitors
+// the specials of a new series; absent means off, as in Scryer.
+const configSeriesSpecials = "monitor_series_specials"
+
+func monitorSeriesSpecials(conn *pluginv1.RouterConnection) bool {
+	return conn.GetConfig().GetFields()[configSeriesSpecials].GetBoolValue()
 }
 
 // configTagTitles is the connection config key of the switch that tags the

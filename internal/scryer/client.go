@@ -423,6 +423,21 @@ func (c *Client) setCollectionMonitored(ctx context.Context, id string, monitore
 	return c.do(ctx, set, map[string]any{"input": map[string]any{"collectionId": id, "monitored": monitored}}, &struct{}{})
 }
 
+// MonitorSpecials monitors the specials of a title the plugin has just created,
+// if it has any.
+func (c *Client) MonitorSpecials(ctx context.Context, titleID string) error {
+	cols, err := c.collections(ctx, titleID, nil, true)
+	if err != nil {
+		return err
+	}
+	for _, col := range cols {
+		if col.Type == "SPECIALS" && (!col.Monitored || col.unmonitoredEpisodes()) && col.EpisodesTotal != nil && *col.EpisodesTotal > 0 {
+			return c.setCollectionMonitored(ctx, col.ID, true)
+		}
+	}
+	return nil
+}
+
 // loaded reports whether Scryer has loaded the title's seasons: some are there,
 // and every requested one is among them.
 func loaded(collections []Collection, seasons []int32) bool {
