@@ -132,34 +132,24 @@ func (c *Client) LibraryID(ctx context.Context, facet, id string) (string, error
 	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, id)
 }
 
-// AddedTitle is the result of AddTitle.
-type AddedTitle struct {
-	ID string
-	// Reused is true when the target library already had the title. Scryer
-	// then ignores the tags sent with the add, so they have to be applied with
-	// UpdateTitleTags.
-	Reused bool
-}
-
-// AddTitle creates the title, or reuses it when Scryer already has it in the
-// target library, and returns its ID.
-func (c *Client) AddTitle(ctx context.Context, in AddTitle) (AddedTitle, error) {
+// AddTitle creates the title, or reuses it when Scryer already has it, and
+// returns its ID.
+func (c *Client) AddTitle(ctx context.Context, in AddTitle) (string, error) {
 	var out struct {
 		AddTitle struct {
 			Title struct {
 				ID string `json:"id"`
 			} `json:"title"`
-			Reused bool `json:"reusedExistingTitle"`
 		} `json:"addTitle"`
 	}
 	const q = `mutation SiloAddTitle($input: AddTitleInput!) { addTitle(input: $input) { title { id } reusedExistingTitle } }`
 	if err := c.do(ctx, q, map[string]any{"input": in}, &out); err != nil {
-		return AddedTitle{}, err
+		return "", err
 	}
 	if out.AddTitle.Title.ID == "" {
-		return AddedTitle{}, errors.New("scryer returned no title id")
+		return "", errors.New("scryer returned no title id")
 	}
-	return AddedTitle{ID: out.AddTitle.Title.ID, Reused: out.AddTitle.Reused}, nil
+	return out.AddTitle.Title.ID, nil
 }
 
 // EnsureTags makes sure each label is defined in Scryer's title-tag registry
@@ -222,12 +212,6 @@ func (c *Client) tagDefinitions(ctx context.Context) (map[string]string, error) 
 		have[strings.ToLower(d.Label)] = d.Label
 	}
 	return have, nil
-}
-
-// UpdateTitleTags adds already defined tags to a title.
-func (c *Client) UpdateTitleTags(ctx context.Context, titleID string, add []string) error {
-	const q = `mutation SiloTagTitle($input: UpdateTitleTagsInput!) { updateTitleTags(input: $input) { id } }`
-	return c.do(ctx, q, map[string]any{"input": map[string]any{"titleIds": []string{titleID}, "add": add}}, &struct{}{})
 }
 
 // Search starts Scryer's automatic search for a title.

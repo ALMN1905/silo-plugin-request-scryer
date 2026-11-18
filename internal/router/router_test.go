@@ -27,8 +27,6 @@ type fakeScryer struct {
 
 	tagDefs       []string // labels already in the tag registry
 	tagCreateErr  string   // makes creating a tag definition fail
-	reused        bool     // addTitle answers that it found the title
-	tagged        []string // labels sent to updateTitleTags
 	tagCreateRace bool     // another request defines the tag just first: create fails, the label exists
 	tagsDown      bool     // the tag list answers 503, as when Scryer is restarting
 }
@@ -57,7 +55,7 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.added = body.Variables["input"].(map[string]any)
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}, "reusedExistingTitle": f.reused}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}, "reusedExistingTitle": false}}})
 	case strings.Contains(body.Query, "titleTagDefinitions") && f.tagsDown:
 		w.WriteHeader(http.StatusServiceUnavailable)
 	case strings.Contains(body.Query, "titleTagDefinitions"):
@@ -78,11 +76,6 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.tagDefs = append(f.tagDefs, body.Variables["input"].(map[string]any)["label"].(string))
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"createTitleTagDefinition": map[string]any{"__typename": "TitleTagDefinitionMutationPayload"}}})
-	case strings.Contains(body.Query, "updateTitleTags"):
-		for _, l := range body.Variables["input"].(map[string]any)["add"].([]any) {
-			f.tagged = append(f.tagged, l.(string))
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"updateTitleTags": []map[string]any{{"id": "t1"}}}})
 	case strings.Contains(body.Query, "libraries("):
 		f.libsQuery = body.Query
 		if f.libsErr != "" {
@@ -446,9 +439,6 @@ func TestRequestTagsAreCreatedAndSentWithANewTitle(t *testing.T) {
 	if len(fake.tagDefs) != 2 || fake.tagDefs[1] != "silo-user-ana-maria" {
 		t.Fatalf("registry = %v, want the missing user tag created and silo-request left alone", fake.tagDefs)
 	}
-	if len(fake.tagged) != 0 {
-		t.Fatalf("a new title was tagged again: %v", fake.tagged)
-	}
 }
 
 func TestRequestWithoutUsernameGetsOnlyTheCommonTag(t *testing.T) {
@@ -460,31 +450,6 @@ func TestRequestWithoutUsernameGetsOnlyTheCommonTag(t *testing.T) {
 	}
 	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request" {
 		t.Fatalf("tags = %s", got)
-	}
-}
-
-// Scryer ignores the tags of an addTitle that finds the title in the library,
-// so they are applied with updateTitleTags, but only if the admin allows it.
-func TestExistingTitleIsTaggedOnlyWhenAllowed(t *testing.T) {
-	for name, tc := range map[string]struct {
-		cfg  map[string]any
-		want string
-	}{
-		"allowed":     {map[string]any{configTagTitles: true, configTagExistingTitles: true}, "silo-request,silo-user-ana"},
-		"not allowed": {map[string]any{configTagTitles: true}, ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			fake := &fakeScryer{reused: true}
-			r, conn := newTestRouter(t, fake)
-			withConfig(t, conn, tc.cfg)
-			d := &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}
-			if _, err := fulfill(t, r, conn, d); err != nil {
-				t.Fatal(err)
-			}
-			if got := strings.Join(fake.tagged, ","); got != tc.want {
-				t.Fatalf("updateTitleTags add = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
 

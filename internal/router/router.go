@@ -115,7 +115,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	}
 	input.Tags = append(input.Tags, tags...)
 
-	added, err := client.AddTitle(ctx, input)
+	titleID, err := client.AddTitle(ctx, input)
 	switch {
 	case errors.As(err, &gqlErr):
 		for _, q := range qualities {
@@ -124,19 +124,6 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		return resp, nil
 	case err != nil:
 		return nil, err
-	}
-
-	titleID := added.ID
-
-	// Scryer ignores the tags of an addTitle that finds the title already in
-	// the library, so, when the admin allows tagging existing titles, they are
-	// applied afterwards. Which titles exist cannot be looked up beforehand
-	// reliably (Scryer's metadata search reported an existing title as new),
-	// but addTitle itself says whether it reused one.
-	if added.Reused && len(tags) > 0 && tagExistingTitles(conn) {
-		if err := client.UpdateTitleTags(ctx, titleID, tags); err != nil {
-			tagNote = " Not tagged: " + shorten(err.Error(), 200) + "."
-		}
 	}
 
 	message := "Added to Scryer; searching for a release."
@@ -194,19 +181,10 @@ func seriesMonitorType(conn *pluginv1.RouterConnection) string {
 	return ""
 }
 
-// Connection config keys of the tagging switches; absent means off, so nothing
-// changes until the admin chooses it.
-const (
-	configTagTitles         = "tag_titles"
-	configTagExistingTitles = "tag_existing_titles"
-)
-
-// tagExistingTitles reports whether a title Scryer already had is tagged too.
-// Tags can drive Scryer's maintenance rules, so touching a title the plugin did
-// not add is something the admin opts into.
-func tagExistingTitles(conn *pluginv1.RouterConnection) bool {
-	return conn.GetConfig().GetFields()[configTagExistingTitles].GetBoolValue()
-}
+// configTagTitles is the connection config key of the switch that tags the
+// titles the plugin adds; absent means off, so nothing changes until the admin
+// chooses it.
+const configTagTitles = "tag_titles"
 
 // requestTags returns the tags for a requested title: a common one to find
 // every Silo request, and one for the requester. Scryer stores labels lowercase
