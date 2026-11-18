@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/neilmc78/silo-plugin-request-scryer/internal/seasonmap"
 )
 
 // ErrUnauthorized means Scryer refused the API key.
@@ -456,6 +458,54 @@ func loaded(collections []Collection, seasons []int32) bool {
 		}
 	}
 	return true
+}
+
+// SeasonStarts lists the regular seasons of a title with the air date of their
+// first episode, for matching them to another catalog's seasons. For a title
+// just created it waits, like MonitorSeasons, until Scryer has loaded them.
+func (c *Client) SeasonStarts(ctx context.Context, titleID string, newTitle bool) ([]seasonmap.Season, error) {
+	for attempt := 0; ; attempt++ {
+		var out struct {
+			Title *struct {
+				Collections []struct {
+					Type     string `json:"collectionType"`
+					Index    string `json:"collectionIndex"`
+					Episodes []struct {
+						AirDate string `json:"airDate"`
+					} `json:"episodes"`
+				} `json:"collections"`
+			} `json:"title"`
+		}
+		const q = `query SiloSeasonDates($id: ID!) { title(id: $id) { collections { collectionType collectionIndex episodes { airDate } } } }`
+		if err := c.do(ctx, q, map[string]any{"id": titleID}, &out); err != nil {
+			return nil, err
+		}
+		if out.Title == nil {
+			return nil, errors.New("the title is gone")
+		}
+		if len(out.Title.Collections) > 0 || !newTitle || attempt >= seasonPolls {
+			var seasons []seasonmap.Season
+			for _, col := range out.Title.Collections {
+				n, err := strconv.Atoi(col.Index)
+				if col.Type != "SEASON" || err != nil {
+					continue
+				}
+				s := seasonmap.Season{Number: n, Episodes: len(col.Episodes)}
+				for _, e := range col.Episodes {
+					if d, err := time.Parse(time.DateOnly, e.AirDate); err == nil && (s.Start.IsZero() || d.Before(s.Start)) {
+						s.Start = d
+					}
+				}
+				seasons = append(seasons, s)
+			}
+			return seasons, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(SeasonPoll):
+		}
+	}
 }
 
 func (c *Client) do(ctx context.Context, query string, vars map[string]any, out any) error {

@@ -37,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -82,6 +82,13 @@
                 "description": "Scryer has no setting for the specials of series: they are never monitored, unlike anime, which follow the anime specials setting in Scryer. With \"Monitor specials of new series\" on, a new series requested from Silo gets its specials monitored (and so downloaded). Off (default): Scryer decides, so they are not. Anime always follow Scryer, and titles Scryer already has keep theirs. Silo can't request specials, so this is the admin's decision.",
                 "control": "ADMIN_FORM_CONTROL_SWITCH",
                 "default_value": false
+              },
+              {
+                "key": "tmdb_api_key",
+                "label": "TMDB API key - Read Access Token",
+                "description": "The API key is REQUIRED for series and anime requests. Silo numbers seasons as TMDB does, and Scryer's seasons can differ (anime above all): with the key the plugin matches each requested season to Scryer's by air date and episode count.",
+                "control": "ADMIN_FORM_CONTROL_PASSWORD",
+                "secret": true
               },
               {
                 "key": "tag_titles",

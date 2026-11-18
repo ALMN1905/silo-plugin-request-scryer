@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/neilmc78/silo-plugin-request-scryer/internal/scryer"
+	"github.com/neilmc78/silo-plugin-request-scryer/internal/seasonmap"
+	"github.com/neilmc78/silo-plugin-request-scryer/internal/tmdb"
 )
 
 // Host-normalized target statuses.
@@ -33,6 +36,10 @@ type Router struct {
 	// fake Scryer.
 	newClient func(conn *pluginv1.RouterConnection) *scryer.Client
 	now       func() time.Time
+
+	// tmdbBase is TMDB's address, changed by tests.
+	tmdbBase string
+	tmdb     sync.Map // tmdb id -> cachedSeasons
 }
 
 var _ pluginv1.RequestRouterServer = (*Router)(nil)
@@ -81,6 +88,13 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 
 	d := req.GetRequest()
 	series := d.GetMediaType() == "series"
+	if series && tmdbKey(conn) == "" {
+		for _, q := range qualities {
+			resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Set a TMDB API key in the plugin settings: a series request needs it to match Silo's seasons to Scryer's."))
+		}
+		return resp, nil
+	}
+
 	// A series request names the seasons wanted; one without any (TMDB lists no
 	// aired season yet) asks for the whole series.
 	seasons := d.GetSeasons()
@@ -93,6 +107,21 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		input.Options = nil
 	}
 	var gqlErr *scryer.GraphQLError
+	// Silo's season numbers are TMDB's. They are read before anything is added,
+	// so a TMDB failure leaves Scryer untouched and the request can be retried.
+	var theirs []seasonmap.Season
+	if series && !whole {
+		var err error
+		switch theirs, err = r.tmdbSeasonsOf(ctx, conn, d); {
+		case errors.Is(err, tmdb.ErrKeyRefused), errors.Is(err, tmdb.ErrNotFound):
+			for _, q := range qualities {
+				resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Could not match the seasons: "+err.Error()))
+			}
+			return resp, nil
+		case err != nil:
+			return nil, err // Silo retries the request
+		}
+	}
 	var libraryNote string
 	if choice := animeMovieLibrary(conn); choice != "" && isAnimeMovie(d) {
 		id, err := client.LibraryID(ctx, "MOVIE", choice)
@@ -187,7 +216,11 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			changed = true
 		}
 	case series && !whole:
-		switched, err := client.MonitorSeasons(ctx, titleID, seasons, !added.Reused)
+		mapped, err := matchSeasons(ctx, client, titleID, seasons, theirs, !added.Reused)
+		var switched bool
+		if err == nil {
+			switched, err = client.MonitorSeasons(ctx, titleID, mapped, !added.Reused)
+		}
 		switch {
 		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrSeasonNotFound):
 			return failed(titleID, "Scryer could not monitor the seasons: "+err.Error()), nil
@@ -287,6 +320,59 @@ const configSeriesSpecials = "monitor_series_specials"
 
 func monitorSeriesSpecials(conn *pluginv1.RouterConnection) bool {
 	return conn.GetConfig().GetFields()[configSeriesSpecials].GetBoolValue()
+}
+
+// configTMDBKey is the connection config key of the TMDB API key. Silo numbers
+// seasons as TMDB does, so a series request cannot be matched to Scryer's seasons
+// without it.
+const configTMDBKey = "tmdb_api_key"
+
+func tmdbKey(conn *pluginv1.RouterConnection) string {
+	return strings.TrimSpace(conn.GetConfig().GetFields()[configTMDBKey].GetStringValue())
+}
+
+// tmdbTTL is how long a series' TMDB seasons are kept.
+const tmdbTTL = 12 * time.Hour
+
+type cachedSeasons struct {
+	seasons []seasonmap.Season
+	until   time.Time
+}
+
+// tmdbSeasonsOf reads the seasons of the requested series from TMDB; nil when
+// the request carries no TMDB id.
+func (r *Router) tmdbSeasonsOf(ctx context.Context, conn *pluginv1.RouterConnection, d *pluginv1.RequestDescriptor) ([]seasonmap.Season, error) {
+	tmdbID := d.GetExternalIds()["tmdb"]
+	if tmdbID == "" {
+		return nil, nil
+	}
+	return r.tmdbSeasons(ctx, tmdbKey(conn), tmdbID)
+}
+
+// matchSeasons turns the TMDB season numbers Silo asked for into Scryer season
+// numbers, by air date and episode count (see seasonmap). With no TMDB seasons
+// the numbers are used as they are.
+func matchSeasons(ctx context.Context, client *scryer.Client, titleID string, seasons []int32, theirs []seasonmap.Season, newTitle bool) ([]int32, error) {
+	if theirs == nil || len(seasons) == 0 {
+		return seasons, nil
+	}
+	ours, err := client.SeasonStarts(ctx, titleID, newTitle)
+	if err != nil {
+		return nil, err
+	}
+	return seasonmap.Map(seasons, theirs, ours), nil
+}
+
+func (r *Router) tmdbSeasons(ctx context.Context, key, tmdbID string) ([]seasonmap.Season, error) {
+	if v, ok := r.tmdb.Load(tmdbID); ok && r.now().Before(v.(cachedSeasons).until) {
+		return v.(cachedSeasons).seasons, nil
+	}
+	seasons, err := tmdb.New(r.tmdbBase, key).Seasons(ctx, tmdbID)
+	if err != nil {
+		return nil, err
+	}
+	r.tmdb.Store(tmdbID, cachedSeasons{seasons: seasons, until: r.now().Add(tmdbTTL)})
+	return seasons, nil
 }
 
 // configTagTitles is the connection config key of the switch that tags the
@@ -424,6 +510,13 @@ func (r *Router) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 		var seasons []int32
 		if d := req.GetRequest(); d.GetMediaType() == "series" {
 			seasons = d.GetSeasons()
+			// The status only needs the seasons; if they cannot be matched now
+			// (TMDB down, say) the numbers are used rather than guessing a failure.
+			if theirs, err := r.tmdbSeasonsOf(ctx, conn, d); err == nil {
+				if mapped, err := matchSeasons(ctx, r.newClient(conn), t.GetExternalId(), seasons, theirs, false); err == nil {
+					seasons = mapped
+				}
+			}
 		}
 		r.describe(st, title, seasons)
 		resp.Statuses = append(resp.Statuses, st)

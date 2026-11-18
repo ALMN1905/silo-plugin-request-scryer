@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/neilmc78/silo-plugin-request-scryer/internal/scryer"
+	"github.com/neilmc78/silo-plugin-request-scryer/internal/tmdb"
 )
 
 func init() { scryer.SeasonPoll = time.Millisecond }
@@ -269,9 +270,17 @@ func TestTestConnectionReportsARefusedKey(t *testing.T) {
 	}
 }
 
-// withConfig sets the connection's settings.
+// withConfig sets the connection's settings; a series request needs a TMDB key,
+// so one is added unless the test sets it.
 func withConfig(t *testing.T, conn *pluginv1.RouterConnection, cfg map[string]any) {
 	t.Helper()
+	if _, ok := cfg[configTMDBKey]; !ok {
+		merged := map[string]any{configTMDBKey: "key"}
+		for k, v := range cfg {
+			merged[k] = v
+		}
+		cfg = merged
+	}
 	st, err := structpb.NewStruct(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -684,6 +693,54 @@ func TestRequestedSeasonMissingInScryerFailsTheTarget(t *testing.T) {
 	}
 }
 
+// Without a TMDB key a series request fails and nothing is added.
+func TestSeriesRequestNeedsATMDBKey(t *testing.T) {
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTMDBKey: ""})
+	resp, err := fulfill(t, r, conn, seasonRequest(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.GetTargets()
+	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "TMDB API key") || fake.added != nil {
+		t.Fatalf("targets = %v, added = %v", got, fake.added)
+	}
+	// a movie does not need it
+	withConfig(t, conn, map[string]any{configTMDBKey: ""})
+	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien"}); err != nil || fake.added == nil {
+		t.Fatalf("movie: err = %v, added = %v", err, fake.added)
+	}
+}
+
+// A key TMDB refuses fails the target; an unreachable TMDB is retried by Silo.
+// Neither leaves anything in Scryer, because TMDB is read before the title is added.
+func TestTMDBFailuresLeaveScryerUntouched(t *testing.T) {
+	d := seasonRequest(1)
+	d.ExternalIds["tmdb"] = "123249"
+	t.Run("key refused", func(t *testing.T) {
+		fake := &fakeScryer{title: seasonTitle(season("s1", "SEASON", "1", false, 3, 0, 0, ""))}
+		r, conn := newTestRouter(t, fake)
+		r.tmdbBase = fakeTMDB(t, http.StatusUnauthorized, nil).URL
+		resp, err := fulfill(t, r, conn, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := resp.GetTargets()
+		if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), tmdb.ErrKeyRefused.Error()) || fake.added != nil {
+			t.Fatalf("targets = %v, added = %v", got, fake.added)
+		}
+	})
+	t.Run("unreachable", func(t *testing.T) {
+		fake := &fakeScryer{title: seasonTitle(season("s1", "SEASON", "1", false, 3, 0, 0, ""))}
+		r, conn := newTestRouter(t, fake)
+		r.tmdbBase = "http://127.0.0.1:1"
+		if _, err := fulfill(t, r, conn, d); err == nil || fake.added != nil {
+			t.Fatalf("err = %v, added = %v", err, fake.added)
+		}
+	})
+}
+
 // A series that has not aired yet has no seasons to name: it is requested whole,
 // with the monitor type the admin chose. One Scryer already has is looked up first
 // and left alone, since the options of an add would replace its settings.
@@ -759,6 +816,81 @@ func TestMonitorSpecialsOfNewSeries(t *testing.T) {
 			}
 			if got := calls(fake.collectionCalls); got != tc.want {
 				t.Fatalf("collection calls = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeTMDB answers /3/tv/<id> with the status and the seasons given, as a
+// [number, air date, episodes] list.
+func fakeTMDB(t *testing.T, status int, seasons [][3]any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		list := []map[string]any{}
+		for _, s := range seasons {
+			list = append(list, map[string]any{"season_number": s[0], "air_date": s[1], "episode_count": s[2]})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"seasons": list})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TMDB lists one season of 24 episodes where Scryer has two of 12: the request
+// for season 1 reaches both.
+func TestSeasonsAreMatchedByAirDate(t *testing.T) {
+	for name, reused := range map[string]bool{"new title": false, "existing title": true} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: reused, title: seasonTitle(
+				season("c1", "SEASON", "1", false, 2, 0, 0, "2022-01-09"),
+				season("c2", "SEASON", "2", false, 2, 0, 0, "2025-01-06"),
+			)}
+			r, conn := newTestRouter(t, fake)
+			r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 4}}).URL
+			d := seasonRequest(1)
+			d.ExternalIds["tmdb"] = "123249"
+			if _, err := fulfill(t, r, conn, d); err != nil {
+				t.Fatal(err)
+			}
+			if reused {
+				if got := calls(fake.episodeCalls); got != "c1e1,c1e2,c2e1,c2e2" {
+					t.Fatalf("episode calls = %q", got)
+				}
+			} else if got := calls(fake.collectionCalls); got != "c1:true,c2:true" {
+				t.Fatalf("collection calls = %q", got)
+			}
+		})
+	}
+}
+
+// The request is complete when every matched Scryer season has files.
+func TestCheckStatusUsesTheMatchedSeasons(t *testing.T) {
+	for name, tc := range map[string]struct {
+		title map[string]any
+		want  string
+	}{
+		"only one of the two seasons has files": {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 0, 2, "2025-01-06")), statusQueued},
+		"both have files":                       {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 1, 2, "2025-01-06")), statusCompleted},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, conn := newTestRouter(t, &fakeScryer{title: tc.title})
+			r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 4}}).URL
+			d := seasonRequest(1)
+			d.ExternalIds["tmdb"] = "123249"
+			resp, err := r.CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+				Request:     d,
+				Targets:     []*pluginv1.TargetRef{{Quality: "1080p", ConnectionId: "c1", ExternalId: "t1"}},
+				Connections: []*pluginv1.RouterConnection{conn},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resp.GetStatuses()[0].GetStatus(); got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
 			}
 		})
 	}
