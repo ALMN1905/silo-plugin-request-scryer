@@ -99,7 +99,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	// aired season yet) asks for the whole series.
 	seasons := d.GetSeasons()
 	whole := series && len(seasons) == 0
-	input := addTitleInput(d, seriesMonitorType(conn))
+	input := addTitleInput(d)
 	if series && !whole {
 		// The seasons are switched on once the title exists, so it is added
 		// unmonitored and without monitor options (see MonitorSeasons).
@@ -288,32 +288,6 @@ func animeMovieLibrary(conn *pluginv1.RouterConnection) string {
 	return strings.TrimSpace(conn.GetConfig().GetFields()[configAnimeMoviesLibrary].GetStringValue())
 }
 
-// configSeriesMonitorType is the connection config key for how a requested
-// series or anime is monitored.
-const configSeriesMonitorType = "series_monitor_type"
-
-// seriesMonitorTypes are the Scryer MonitorTypeValue names offered for series.
-// UNMONITORED would make a request do nothing, ADVANCED needs a season
-// selection and NONE is not a monitoring choice.
-var seriesMonitorTypes = map[string]bool{
-	"ALL_EPISODES":                true,
-	"MISSING_AND_FUTURE_EPISODES": true,
-	"FUTURE_EPISODES":             true,
-}
-
-// seriesMonitorType returns the monitoring to send for a series or anime, or
-// "" to send none. Nothing is sent unless the admin picked a type: Scryer
-// applies a sent type to a title it already has too (replacing its monitor
-// type and clearing any season selection), so sending one by default would
-// change the monitoring of every series that is requested again.
-func seriesMonitorType(conn *pluginv1.RouterConnection) string {
-	v := strings.TrimSpace(conn.GetConfig().GetFields()[configSeriesMonitorType].GetStringValue())
-	if seriesMonitorTypes[v] {
-		return v
-	}
-	return ""
-}
-
 // configSeriesSpecials is the connection config key of the switch that monitors
 // the specials of a new series; absent means off, as in Scryer.
 const configSeriesSpecials = "monitor_series_specials"
@@ -446,7 +420,7 @@ func shorten(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.AddTitle {
+func addTitleInput(d *pluginv1.RequestDescriptor) scryer.AddTitle {
 	in := scryer.AddTitle{
 		Name:      d.GetTitle(),
 		Facet:     "MOVIE",
@@ -458,9 +432,10 @@ func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.Add
 		if d.GetIsAnime() {
 			in.Facet = "ANIME"
 		}
-		if monitorType != "" {
-			in.Options = &scryer.TitleOptions{MonitorType: monitorType}
-		}
+		// Scryer would monitor every episode of a title added without options
+		// (it ignores the library's default), so say what a request wants:
+		// what is missing and what is to come.
+		in.Options = &scryer.TitleOptions{MonitorType: "MISSING_AND_FUTURE_EPISODES"}
 	}
 	if y := int(d.GetYear()); y > 0 {
 		in.Year = &y

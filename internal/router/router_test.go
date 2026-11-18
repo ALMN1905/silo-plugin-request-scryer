@@ -396,49 +396,21 @@ func TestListConfigOptionsIsEmptyWhenLibrariesCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestSeriesAndAnimeSendOnlyAChosenMonitorType(t *testing.T) {
-	series := &pluginv1.RequestDescriptor{MediaType: "series", Title: "24", ExternalIds: map[string]string{"tvdb": "76290"}}
-	anime := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Barakamon", IsAnime: true, ExternalIds: map[string]string{"tvdb": "1"}}
-	cases := []struct {
-		name string
-		d    *pluginv1.RequestDescriptor
-		cfg  map[string]any
-		want string
-	}{
-		// No choice sends no options, so a series Scryer already has keeps its
-		// monitoring: Scryer applies a sent type to an existing title too.
-		{"series, nothing saved", series, nil, ""},
-		{"anime, nothing saved", anime, nil, ""},
-		{"leave to Scryer", series, map[string]any{configSeriesMonitorType: "DEFAULT"}, ""},
-		{"series configured", series, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES"}, "FUTURE_EPISODES"},
-		{"anime configured", anime, map[string]any{configSeriesMonitorType: "MISSING_AND_FUTURE_EPISODES"}, "MISSING_AND_FUTURE_EPISODES"},
-		{"all episodes configured", series, map[string]any{configSeriesMonitorType: "ALL_EPISODES"}, "ALL_EPISODES"},
-		{"unknown value sends none", series, map[string]any{configSeriesMonitorType: "ADVANCED"}, ""},
-		{"unmonitored is not offered", series, map[string]any{configSeriesMonitorType: "UNMONITORED"}, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+// A series or anime added whole always says what to monitor: Scryer would
+// monitor everything otherwise. A season request sends no options at all.
+func TestWholeSeriesAndAnimeSendMissingAndFutureEpisodes(t *testing.T) {
+	for name, d := range map[string]*pluginv1.RequestDescriptor{
+		"series": {MediaType: "series", Title: "24", ExternalIds: map[string]string{"tvdb": "76290"}},
+		"anime":  {MediaType: "series", Title: "Barakamon", IsAnime: true, ExternalIds: map[string]string{"tvdb": "1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
 			fake := &fakeScryer{}
 			r, conn := newTestRouter(t, fake)
-			if tc.cfg != nil {
-				withConfig(t, conn, tc.cfg)
-			}
-			if _, err := r.Fulfill(context.Background(), &pluginv1.FulfillRequest{
-				Request:     tc.d,
-				Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p"}},
-				Connections: []*pluginv1.RouterConnection{conn},
-			}); err != nil {
+			if _, err := fulfill(t, r, conn, d); err != nil {
 				t.Fatal(err)
 			}
-			opts, sent := fake.added["options"].(map[string]any)
-			if tc.want == "" {
-				if sent {
-					t.Fatalf("options sent with no monitoring chosen: %v", opts)
-				}
-				return
-			}
-			if opts["monitorType"] != tc.want {
-				t.Fatalf("options = %v, want monitorType %s", fake.added["options"], tc.want)
+			if opts, _ := fake.added["options"].(map[string]any); opts["monitorType"] != "MISSING_AND_FUTURE_EPISODES" {
+				t.Fatalf("options = %v", fake.added["options"])
 			}
 		})
 	}
@@ -571,7 +543,7 @@ func TestRequestedSeasonsOfANewTitle(t *testing.T) {
 		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
 	)}
 	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configSeriesMonitorType: "ALL_EPISODES", configTagTitles: true})
+	withConfig(t, conn, map[string]any{configTagTitles: true})
 	d := seasonRequest(2, 3)
 	d.RequesterUsername = "ana"
 	if _, err := fulfill(t, r, conn, d); err != nil {
@@ -632,7 +604,7 @@ func TestRequestedSeasonsOfAnExistingTitleSwitchOnOnlyWhatIsMissing(t *testing.T
 		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
 	)}
 	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesSpecials: true, configSeriesMonitorType: "ALL_EPISODES"})
+	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesSpecials: true})
 	d := seasonRequest(1, 2)
 	d.RequesterUsername = "ana"
 	resp, err := fulfill(t, r, conn, d)
@@ -749,19 +721,18 @@ func TestWholeSeriesRequest(t *testing.T) {
 	t.Run("new title", func(t *testing.T) {
 		fake := &fakeScryer{titles: []map[string]any{{"id": "x", "externalIds": []map[string]string{{"source": "tmdb", "value": "999"}}}}}
 		r, conn := newTestRouter(t, fake)
-		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES"})
 		if _, err := fulfill(t, r, conn, d); err != nil {
 			t.Fatal(err)
 		}
 		opts, _ := fake.added["options"].(map[string]any)
-		if fake.added["monitored"] != true || opts["monitorType"] != "FUTURE_EPISODES" || fake.searches != 1 {
+		if fake.added["monitored"] != true || opts["monitorType"] != "MISSING_AND_FUTURE_EPISODES" || fake.searches != 1 {
 			t.Fatalf("added = %v, searches = %d", fake.added, fake.searches)
 		}
 	})
 	t.Run("title Scryer already has", func(t *testing.T) {
 		fake := &fakeScryer{titles: []map[string]any{{"id": "t9", "externalIds": []map[string]string{{"source": "tmdb", "value": "100"}}}}}
 		r, conn := newTestRouter(t, fake)
-		withConfig(t, conn, map[string]any{configSeriesMonitorType: "FUTURE_EPISODES", configTagTitles: true, configSeriesSpecials: true})
+		withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesSpecials: true})
 		resp, err := fulfill(t, r, conn, d)
 		if err != nil {
 			t.Fatal(err)

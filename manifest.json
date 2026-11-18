@@ -37,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -46,35 +46,6 @@
                 "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
                 "dynamic_options": true
-              },
-              {
-                "key": "series_monitor_type",
-                "label": "Series and anime monitoring",
-                "description": "Which episodes Scryer monitors (and so downloads) when a series or anime is requested without a season list, which is a series that has not aired yet. A request that names seasons monitors those seasons whole. Only affects new titles, so Scryer's current state is never changed.",
-                "control": "ADMIN_FORM_CONTROL_SELECT",
-                "default_value": "DEFAULT",
-                "options": [
-                  {
-                    "value": "DEFAULT",
-                    "label": "Leave to Scryer",
-                    "description": "Send no monitoring choice. A new series has every episode monitored; one already in Scryer keeps its monitoring."
-                  },
-                  {
-                    "value": "ALL_EPISODES",
-                    "label": "All episodes",
-                    "description": "Every episode, including already aired ones."
-                  },
-                  {
-                    "value": "MISSING_AND_FUTURE_EPISODES",
-                    "label": "Missing and future episodes",
-                    "description": "Everything Scryer has no file for, plus future episodes."
-                  },
-                  {
-                    "value": "FUTURE_EPISODES",
-                    "label": "Future episodes only",
-                    "description": "Episodes that have not aired yet. No backlog download."
-                  }
-                ]
               },
               {
                 "key": "monitor_series_specials",

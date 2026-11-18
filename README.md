@@ -26,7 +26,7 @@ A request is meant to end in a download, so what the plugin changes in Scryer is
 
 The plugin declares that it takes seasons (`supports_seasons`), so Silo lets a user request more seasons of a series that is already in its library.
 
-A series that has not aired yet has no seasons to name; Silo then asks for the whole series. **Series and anime monitoring** in the server's settings picks which episodes Scryer monitors for it: *Leave to Scryer* (default), *All episodes*, *Missing and future episodes* or *Future episodes only*. With *Leave to Scryer* the plugin sends no choice, and Scryer monitors every episode (it does not apply the library's default monitoring to titles added through the API). A title Scryer already has is looked up first and left as it is.
+A series that has not aired yet has no seasons to name; Silo then asks for the whole series. The plugin adds it monitored with *Missing and future episodes*: its aired episodes, if Scryer already has some (Scryer's data can be ahead of TMDB's), and everything to come. A title Scryer already has is looked up first and left as it is. Scryer monitors every episode of a title added without a choice (it does not apply the library's default monitoring to titles added through the API), which is why the plugin always sends one.
 
 **Monitor specials of new series** monitors the specials of a new series (not anime), off by default. Scryer has no setting for the specials of a series: they are never monitored, unlike anime, which follow the anime specials setting in Scryer. The switch fills that gap, and only for new series; anime and titles Scryer already has keep what Scryer says. Silo cannot request specials, so this is the admin's decision.
 
