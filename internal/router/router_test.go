@@ -1169,3 +1169,20 @@ func TestMovieIsLookedUpInAllMovieLibrariesBeforeItIsAdded(t *testing.T) {
 		})
 	}
 }
+
+// A new title whose metadata Scryer has loaded (metadataFetchedAt is set, the
+// seasons are there) and that still lacks a requested season does not make the
+// request wait for it: the season is not coming.
+func TestMissingSeasonOfANewTitleDoesNotWait(t *testing.T) {
+	title := seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))
+	title["metadataFetchedAt"] = "2026-11-19T00:00:00Z"
+	fake := &fakeScryer{title: title}
+	r, conn := newTestRouter(t, fake)
+	resp, err := fulfill(t, r, conn, seasonRequest(1, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.reads != 1 || !strings.Contains(targetMessage(t, resp), "Left out, not in Scryer: season 3") {
+		t.Fatalf("title reads = %d, message %q", fake.reads, targetMessage(t, resp))
+	}
+}

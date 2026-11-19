@@ -359,17 +359,20 @@ func (c *Client) collections(ctx context.Context, titleID string, seasons []int3
 	for attempt := 0; ; attempt++ {
 		var out struct {
 			Title *struct {
-				Collections []Collection `json:"collections"`
+				MetadataFetchedAt *string      `json:"metadataFetchedAt"`
+				Collections       []Collection `json:"collections"`
 			} `json:"title"`
 		}
-		const q = `query SiloSeasons($id: ID!) { title(id: $id) { collections { id collectionType collectionIndex monitored episodesMonitored episodesTotal episodes { id monitored mediaFiles { id } } } } }`
+		const q = `query SiloSeasons($id: ID!) { title(id: $id) { metadataFetchedAt collections { id collectionType collectionIndex monitored episodesMonitored episodesTotal episodes { id monitored mediaFiles { id } } } } }`
 		if err := c.do(ctx, q, map[string]any{"id": titleID}, &out); err != nil {
 			return nil, err
 		}
 		if out.Title == nil {
 			return nil, fmt.Errorf("%w: the title is gone", ErrSeasonNotFound)
 		}
-		if !newTitle || attempt >= seasonPolls || loaded(out.Title.Collections, seasons) {
+		// Scryer sets metadataFetchedAt in the same moment the seasons appear, so
+		// once it is set a season that is still missing is not coming.
+		if !newTitle || attempt >= seasonPolls || loaded(out.Title.Collections, seasons) || (out.Title.MetadataFetchedAt != nil && len(out.Title.Collections) > 0) {
 			return out.Title.Collections, nil
 		}
 		select {
