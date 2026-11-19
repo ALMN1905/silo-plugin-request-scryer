@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -481,7 +482,7 @@ func seasonTitle(collections ...map[string]any) map[string]any {
 	for _, c := range collections {
 		list = append(list, c)
 	}
-	return map[string]any{"id": "t1", "monitored": true, "mediaFiles": []any{map[string]any{"id": "f"}}, "downloadQueueItems": []any{}, "collections": list}
+	return map[string]any{"id": "t1", "monitored": true, "mediaFiles": []any{map[string]any{"id": "f"}}, "downloadQueueItems": []any{}, "collections": list, "metadataFetchedAt": "2026-11-19T00:00:00Z"}
 }
 
 func movieTitle(monitored, file bool) map[string]any {
@@ -703,20 +704,10 @@ func TestRequestedSeasonsMissingInScryer(t *testing.T) {
 	}
 }
 
-// Without a TMDB key a series request fails and nothing is added.
-func TestSeriesRequestNeedsATMDBKey(t *testing.T) {
+// A movie does not need a TMDB key.
+func TestMovieDoesNotNeedATMDBKey(t *testing.T) {
 	fake := &fakeScryer{}
 	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configTMDBKey: ""})
-	resp, err := fulfill(t, r, conn, seasonRequest(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := resp.GetTargets()
-	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "TMDB API Read Access Token") || fake.added != nil {
-		t.Fatalf("targets = %v, added = %v", got, fake.added)
-	}
-	// a movie does not need it
 	withConfig(t, conn, map[string]any{configTMDBKey: ""})
 	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien"}); err != nil || fake.added == nil {
 		t.Fatalf("movie: err = %v, added = %v", err, fake.added)
@@ -732,13 +723,9 @@ func TestTMDBFailuresLeaveScryerUntouched(t *testing.T) {
 		fake := &fakeScryer{title: seasonTitle(season("s1", "SEASON", "1", false, 3, 0, 0, ""))}
 		r, conn := newTestRouter(t, fake)
 		r.tmdbBase = fakeTMDB(t, http.StatusUnauthorized, nil).URL
-		resp, err := fulfill(t, r, conn, d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := resp.GetTargets()
-		if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), tmdb.ErrKeyRefused.Error()) || fake.added != nil {
-			t.Fatalf("targets = %v, added = %v", got, fake.added)
+		// A refused key is a setup problem too: an error, so Silo retries.
+		if _, err := fulfill(t, r, conn, d); !errors.Is(err, tmdb.ErrKeyRefused) || fake.added != nil {
+			t.Fatalf("err = %v, added = %v", err, fake.added)
 		}
 	})
 	t.Run("unreachable", func(t *testing.T) {
@@ -1202,20 +1189,11 @@ func TestMissingSeasonOfANewTitleDoesNotWait(t *testing.T) {
 }
 
 // Only the API Read Access Token is accepted: it cannot change anything on TMDB,
-// the API key can. A key that is not a token fails the request and the form.
+// the API key can. A key that is not a token is refused by the form.
 func TestOnlyTheTMDBReadAccessTokenIsAccepted(t *testing.T) {
 	apiKey := "0123456789abcdef0123456789abcdef"
-	fake := &fakeScryer{}
-	r, conn := newTestRouter(t, fake)
+	r, conn := newTestRouter(t, &fakeScryer{})
 	withConfig(t, conn, map[string]any{configTMDBKey: apiKey})
-	resp, err := fulfill(t, r, conn, seasonRequest(1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := resp.GetTargets()
-	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "must be the API Read Access Token") || fake.added != nil {
-		t.Fatalf("targets = %v, added = %v", got, fake.added)
-	}
 	v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
 	if err != nil || v.GetFieldErrors()[configTMDBKey] == "" {
 		t.Fatalf("validate = %v, %v", v, err)
@@ -1267,5 +1245,29 @@ func TestSpecialsNotLoadedYetDoNotFailTheRequest(t *testing.T) {
 	resp, err := fulfill(t, r, conn, w)
 	if err != nil || len(resp.GetTargets()) != 1 || resp.GetTargets()[0].GetStatus() != statusQueued {
 		t.Fatalf("resp = %v, err = %v", resp, err)
+	}
+}
+
+// A new title whose seasons Scryer has still not loaded when the wait ends (its
+// metadata is not fetched) is a matter of time: an error, so Silo retries later.
+// The retry finds the title in Scryer and carries on.
+func TestNewTitleStillLoadingAfterTheWaitIsRetried(t *testing.T) {
+	title := seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))
+	title["metadataFetchedAt"] = nil
+	fake := &fakeScryer{title: title, hydrateAfter: 1000}
+	r, conn := newTestRouter(t, fake)
+	if _, err := fulfill(t, r, conn, seasonRequest(1)); !errors.Is(err, scryer.ErrNotLoaded) || len(fake.collectionCalls)+len(fake.episodeCalls) != 0 {
+		t.Fatalf("err = %v, collections %v, episodes %v", err, fake.collectionCalls, fake.episodeCalls)
+	}
+	// Later, Scryer has loaded it: the title is now an existing one.
+	fake.hydrateAfter = 0
+	fake.title["metadataFetchedAt"] = "2026-11-19T00:00:00Z"
+	fake.reused = true
+	fake.titles = []map[string]any{{"id": "t1", "externalIds": []map[string]string{{"source": "tmdb", "value": "100"}}}}
+	d := seasonRequest(1)
+	d.ExternalIds["tmdb"] = "100"
+	r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "", 2}}).URL
+	if _, err := fulfill(t, r, conn, d); err != nil || calls(fake.episodeCalls) != "s1e1,s1e2" {
+		t.Fatalf("retry: err = %v, episodes %v", err, fake.episodeCalls)
 	}
 }

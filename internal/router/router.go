@@ -6,6 +6,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,14 +90,6 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 
 	d := req.GetRequest()
 	series := d.GetMediaType() == "series"
-	if series {
-		if msg := tmdbKeyProblem(tmdbKey(conn)); msg != "" {
-			for _, q := range qualities {
-				resp.Targets = append(resp.Targets, target(q, "", statusFailed, msg))
-			}
-			return resp, nil
-		}
-	}
 
 	// A series request names the seasons wanted; one without any (TMDB lists no
 	// aired season yet) asks for the whole series.
@@ -116,7 +109,9 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	if series && !whole {
 		var err error
 		switch theirs, err = r.tmdbSeasonsOf(ctx, conn, d); {
-		case errors.Is(err, tmdb.ErrKeyRefused), errors.Is(err, tmdb.ErrNotFound):
+		case errors.Is(err, tmdb.ErrKeyRefused):
+			return nil, fmt.Errorf("could not match the seasons: %w; check the key in the plugin settings", err) // a setup problem: Silo retries
+		case errors.Is(err, tmdb.ErrNotFound):
 			for _, q := range qualities {
 				resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Could not match the seasons: "+err.Error()))
 			}

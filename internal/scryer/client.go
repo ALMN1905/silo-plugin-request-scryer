@@ -345,6 +345,10 @@ func (c *Client) Title(ctx context.Context, id string) (*Title, error) {
 // ErrSeasonNotFound means the title has no season with the requested number.
 var ErrSeasonNotFound = errors.New("scryer has no such season")
 
+// ErrNotLoaded means Scryer had not finished loading a new title's seasons when
+// the wait ended. It is a matter of time, so the caller retries later.
+var ErrNotLoaded = errors.New("scryer has not finished loading the title's seasons")
+
 // SeasonPoll is how long MonitorSeasons waits between reads of a title that has
 // just been created, while Scryer is still loading its seasons.
 var SeasonPoll = 2 * time.Second
@@ -372,7 +376,13 @@ func (c *Client) collections(ctx context.Context, titleID string, seasons []int3
 		}
 		// Scryer sets metadataFetchedAt in the same moment the seasons appear, so
 		// once it is set a season that is still missing is not coming.
-		if !newTitle || attempt >= seasonPolls || loaded(out.Title.Collections, seasons) || (out.Title.MetadataFetchedAt != nil && len(out.Title.Collections) > 0) {
+		if !newTitle || loaded(out.Title.Collections, seasons) || (out.Title.MetadataFetchedAt != nil && len(out.Title.Collections) > 0) {
+			return out.Title.Collections, nil
+		}
+		if attempt >= seasonPolls {
+			if out.Title.MetadataFetchedAt == nil {
+				return nil, ErrNotLoaded
+			}
 			return out.Title.Collections, nil
 		}
 		select {
@@ -472,6 +482,9 @@ func (c *Client) setCollectionMonitored(ctx context.Context, id string, monitore
 // if it has any.
 func (c *Client) MonitorSpecials(ctx context.Context, titleID string) error {
 	cols, err := c.collections(ctx, titleID, nil, true)
+	if errors.Is(err, ErrNotLoaded) {
+		return nil // nothing to monitor yet; the title itself is already in place
+	}
 	if err != nil {
 		return err
 	}
