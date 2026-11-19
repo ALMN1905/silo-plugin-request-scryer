@@ -306,6 +306,9 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 // value means the default movie library.
 const configAnimeMoviesLibrary = "anime_movies_library"
 
+// defaultMovieLibraryID is the id Scryer gives its default movie library.
+const defaultMovieLibraryID = "movie_default_library"
+
 func isAnimeMovie(d *pluginv1.RequestDescriptor) bool {
 	return d.GetMediaType() == "movie" && d.GetIsAnime()
 }
@@ -669,12 +672,22 @@ func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 		return resp, nil
 	}
 	// Silo's form fills an empty dynamic choice with the first option, so the
-	// first option is "none": the field must be able to stay unset.
-	list := &pluginv1.ConfigOptionList{Options: []*pluginv1.ConfigOption{
-		{Value: "", Label: "Scryer's default movie library"},
-	}}
+	// first option must be the one that leaves anime movies in the default movie
+	// library: that library itself, named as such, when the key can list it,
+	// otherwise a stand-in with an empty value.
+	list := &pluginv1.ConfigOptionList{}
 	for _, l := range libs {
-		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.ID, Label: l.Name})
+		if l.ID == defaultMovieLibraryID {
+			list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.ID, Label: l.Name + " (Scryer's default movie library)"})
+		}
+	}
+	if len(list.Options) == 0 {
+		list.Options = append(list.Options, &pluginv1.ConfigOption{Value: "", Label: "Scryer's default movie library"})
+	}
+	for _, l := range libs {
+		if l.ID != defaultMovieLibraryID {
+			list.Options = append(list.Options, &pluginv1.ConfigOption{Value: l.ID, Label: l.Name})
+		}
 	}
 	resp.OptionsByField = map[string]*pluginv1.ConfigOptionList{configAnimeMoviesLibrary: list}
 	return resp, nil

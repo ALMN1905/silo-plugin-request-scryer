@@ -374,21 +374,35 @@ func TestAnimeMovieFallsBackToTheDefaultLibrary(t *testing.T) {
 }
 
 func TestListConfigOptionsOffersMovieLibraries(t *testing.T) {
-	fake := &fakeScryer{libs: []map[string]any{{"id": "a", "name": "Movies"}, {"id": "b", "name": "Anime Movies"}}}
+	fake := &fakeScryer{libs: []map[string]any{{"id": "c45151a6", "name": "Anime Movies"}, {"id": "movie_default_library", "name": "Movies"}}}
 	r, conn := newTestRouter(t, fake)
 	resp, err := r.ListConfigOptions(context.Background(), &pluginv1.ListConfigOptionsRequest{Connection: conn})
 	if err != nil {
 		t.Fatal(err)
 	}
 	opts := resp.GetOptionsByField()[configAnimeMoviesLibrary].GetOptions()
-	// Silo fills an empty dynamic choice with the first option, so "none"
-	// comes first and the field can stay unset.
-	if len(opts) != 3 || opts[0].GetValue() != "" || opts[2].GetValue() != "b" || opts[2].GetLabel() != "Anime Movies" {
+	// Silo fills an empty dynamic choice with the first option, so the default
+	// library comes first, named as such, and is not listed twice.
+	if len(opts) != 2 || opts[0].GetValue() != "movie_default_library" || opts[0].GetLabel() != "Movies (Scryer's default movie library)" || opts[1].GetValue() != "c45151a6" || opts[1].GetLabel() != "Anime Movies" {
 		t.Fatalf("options = %v", opts)
 	}
 	// Only libraries the key can add titles to are offered.
 	if !strings.Contains(fake.libsQuery, "MANAGE_TITLES") {
 		t.Fatalf("libraries query = %q", fake.libsQuery)
+	}
+}
+
+// When the key cannot list the default library, a stand-in with an empty value
+// comes first, so the form does not fill the field with another library.
+func TestListConfigOptionsKeepsAStandInWhenTheDefaultLibraryIsNotListed(t *testing.T) {
+	r, conn := newTestRouter(t, &fakeScryer{libs: []map[string]any{{"id": "c45151a6", "name": "Anime Movies"}}})
+	resp, err := r.ListConfigOptions(context.Background(), &pluginv1.ListConfigOptionsRequest{Connection: conn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := resp.GetOptionsByField()[configAnimeMoviesLibrary].GetOptions()
+	if len(opts) != 2 || opts[0].GetValue() != "" || opts[0].GetLabel() != "Scryer's default movie library" || opts[1].GetValue() != "c45151a6" {
+		t.Fatalf("options = %v", opts)
 	}
 }
 
