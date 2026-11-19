@@ -365,7 +365,9 @@ func (c *Client) collections(ctx context.Context, titleID string, seasons []int3
 }
 
 // MonitorSeasons makes sure the given seasons of a title will be downloaded and
-// reports whether it had to change anything.
+// reports whether it had to change anything, and which of the seasons Scryer
+// does not have (yet): they are left out, the others are still monitored. It
+// fails with ErrSeasonNotFound only when none of the seasons exists.
 //
 // A new title (newTitle) has nothing yet, so each requested season is switched
 // on with all its episodes. In a title Scryer already had, only the episodes
@@ -376,24 +378,25 @@ func (c *Client) collections(ctx context.Context, titleID string, seasons []int3
 // Scryer's addTitle options are not used for any of this: on a title Scryer
 // already has they replace its stored monitor type and clear its season
 // selection.
-func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []int32, newTitle bool) (bool, error) {
+func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []int32, newTitle bool) (changed bool, missing []int32, err error) {
 	cols, err := c.collections(ctx, titleID, seasons, newTitle)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	// Every season is looked for before anything is changed, so a missing one
-	// leaves the title as it was.
 	var wanted []Collection
 	for _, n := range seasons {
 		i := slices.IndexFunc(cols, func(col Collection) bool {
 			return col.Index == strconv.Itoa(int(n)) && (col.Type == "SEASON" || col.Type == "SPECIALS")
 		})
 		if i < 0 {
-			return false, fmt.Errorf("%w: season %d", ErrSeasonNotFound, n)
+			missing = append(missing, n)
+			continue
 		}
 		wanted = append(wanted, cols[i])
 	}
-	changed := false
+	if len(wanted) == 0 {
+		return false, missing, fmt.Errorf("%w: %s", ErrSeasonNotFound, SeasonList(missing))
+	}
 	for _, col := range wanted {
 		switch {
 		case newTitle:
@@ -401,7 +404,7 @@ func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []i
 				continue
 			}
 			if err := c.setCollectionMonitored(ctx, col.ID, true); err != nil {
-				return changed, err
+				return changed, missing, err
 			}
 			changed = true
 		default:
@@ -411,13 +414,25 @@ func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []i
 				}
 				const set = `mutation SiloMonitorEpisode($input: SetEpisodeMonitoredInput!) { setEpisodeMonitored(input: $input) { __typename } }`
 				if err := c.do(ctx, set, map[string]any{"input": map[string]any{"episodeId": e.ID, "monitored": true}}, &struct{}{}); err != nil {
-					return changed, err
+					return changed, missing, err
 				}
 				changed = true
 			}
 		}
 	}
-	return changed, nil
+	return changed, missing, nil
+}
+
+// SeasonList reads season numbers for a message: "season 5" or "seasons 4, 5".
+func SeasonList(seasons []int32) string {
+	parts := make([]string, len(seasons))
+	for i, n := range seasons {
+		parts[i] = strconv.Itoa(int(n))
+	}
+	if len(parts) == 1 {
+		return "season " + parts[0]
+	}
+	return "seasons " + strings.Join(parts, ", ")
 }
 
 func (c *Client) setCollectionMonitored(ctx context.Context, id string, monitored bool) error {

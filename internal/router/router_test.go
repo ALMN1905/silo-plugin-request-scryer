@@ -643,19 +643,39 @@ func TestRequestedSeasonsAlreadyOwnedOrMonitoredChangeNothing(t *testing.T) {
 	}
 }
 
-// A season Scryer does not have fails the target, and nothing is changed, not
-// even the seasons that could have been.
-func TestRequestedSeasonMissingInScryerFailsTheTarget(t *testing.T) {
+// Seasons Scryer does not have (an upcoming one, say) are left out and reported;
+// the others are requested all the same. With none of them in Scryer the target
+// fails and nothing is changed.
+func TestRequestedSeasonsMissingInScryer(t *testing.T) {
 	for name, reused := range map[string]bool{"new title": false, "existing title": true} {
-		t.Run(name, func(t *testing.T) {
-			fake := &fakeScryer{reused: reused, title: seasonTitle(season("s1", "SEASON", "1", false, 3, 0, 0, ""))}
+		t.Run(name+", some missing", func(t *testing.T) {
+			fake := &fakeScryer{reused: reused, title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))}
 			r, conn := newTestRouter(t, fake)
 			resp, err := fulfill(t, r, conn, seasonRequest(1, 5))
 			if err != nil {
 				t.Fatal(err)
 			}
 			got := resp.GetTargets()
-			if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "season 5") {
+			if len(got) != 1 || got[0].GetStatus() != statusQueued || !strings.Contains(got[0].GetMessage(), "Left out, not in Scryer: season 5") {
+				t.Fatalf("targets = %v", got)
+			}
+			if reused {
+				if calls(fake.episodeCalls) != "s1e1,s1e2" {
+					t.Fatalf("episode calls = %v", fake.episodeCalls)
+				}
+			} else if calls(fake.collectionCalls) != "s1:true" {
+				t.Fatalf("collection calls = %v", fake.collectionCalls)
+			}
+		})
+		t.Run(name+", all missing", func(t *testing.T) {
+			fake := &fakeScryer{reused: reused, title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))}
+			r, conn := newTestRouter(t, fake)
+			resp, err := fulfill(t, r, conn, seasonRequest(4, 5))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := resp.GetTargets()
+			if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "seasons 4, 5") {
 				t.Fatalf("targets = %v", got)
 			}
 			if len(fake.collectionCalls)+len(fake.episodeCalls) != 0 {
@@ -874,10 +894,12 @@ func TestCheckStatusCompletesOnlyWhenTheRequestedSeasonsHaveFiles(t *testing.T) 
 		seasons []int32
 		want    string
 	}{
-		"season 1 has files":                {[]int32{1}, statusCompleted},
-		"season 2 has none":                 {[]int32{2}, statusQueued},
-		"one of two requested has none":     {[]int32{1, 2}, statusQueued},
-		"no seasons: any file of the title": {nil, statusCompleted},
+		"season 1 has files":                 {[]int32{1}, statusCompleted},
+		"season 2 has none":                  {[]int32{2}, statusQueued},
+		"one of two requested has none":      {[]int32{1, 2}, statusQueued},
+		"no seasons: any file of the title":  {nil, statusCompleted},
+		"a season Scryer lacks is left out":  {[]int32{1, 5}, statusCompleted},
+		"none of the requested is in Scryer": {[]int32{5}, statusQueued},
 	} {
 		t.Run(name, func(t *testing.T) {
 			title := seasonTitle(season("s1", "SEASON", "1", true, 2, 1, 2, ""), season("s2", "SEASON", "2", true, 2, 0, 2, ""))

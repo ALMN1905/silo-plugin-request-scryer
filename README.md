@@ -22,7 +22,7 @@ A request is meant to end in a download, so what the plugin changes in Scryer is
 
 **Movies.** A new movie is added monitored. A movie Scryer already has is left alone when it has a file; without one, it is switched on so the request downloads.
 
-**Series and anime** request the seasons Silo names. Anime series go to Scryer's anime library. A new title is added unmonitored and then each requested season is switched on whole; Scryer loads a new title's seasons a few seconds after it is added, so the plugin waits for them. In a title Scryer already has, only the episodes of the requested seasons that have no file and are not monitored are switched on, one by one. A season Scryer does not have fails the request with that message and changes nothing. The request counts as completed when every requested season has files.
+**Series and anime** request the seasons Silo names. Anime series go to Scryer's anime library. A new title is added unmonitored and then each requested season is switched on whole; Scryer loads a new title's seasons a few seconds after it is added, so the plugin waits for them. In a title Scryer already has, only the episodes of the requested seasons that have no file and are not monitored are switched on, one by one. A season Scryer does not have (an upcoming one, say) is left out and named in the request's message, and the other seasons are requested all the same; with none of them in Scryer the request fails and changes nothing. The request counts as completed when every requested season Scryer has got files.
 
 The plugin declares that it takes seasons (`supports_seasons`), so Silo lets a user request more seasons of a series that is already in its library.
 

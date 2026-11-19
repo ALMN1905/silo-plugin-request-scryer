@@ -6,6 +6,7 @@ package router
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -194,6 +195,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	// counts when the plugin had to switch something on.
 	changed := !added.Reused
 	hasFile := false
+	var seasonNote string
 	switch {
 	case !series && added.Reused:
 		// A movie Scryer already has is left alone when it has a file; without
@@ -218,8 +220,9 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	case series && !whole:
 		mapped, err := matchSeasons(ctx, client, titleID, seasons, theirs, !added.Reused)
 		var switched bool
+		var missing []int32
 		if err == nil {
-			switched, err = client.MonitorSeasons(ctx, titleID, mapped, !added.Reused)
+			switched, missing, err = client.MonitorSeasons(ctx, titleID, mapped, !added.Reused)
 		}
 		switch {
 		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrSeasonNotFound):
@@ -228,6 +231,11 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			return nil, err // Silo retries the request
 		}
 		changed = changed || switched
+		if len(missing) > 0 {
+			// Scryer does not have these seasons (yet, say an upcoming one): the
+			// others are requested all the same.
+			seasonNote = " Left out, not in Scryer: " + scryer.SeasonList(missing) + "."
+		}
 	}
 
 	// Scryer has no setting for the specials of a series, so a new series gets
@@ -265,7 +273,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			message = "Added to Scryer, but the search did not start; Scryer will pick it up from its RSS sync."
 		}
 	}
-	message += libraryNote + tagNote
+	message += libraryNote + seasonNote + tagNote
 	for _, q := range qualities {
 		resp.Targets = append(resp.Targets, target(q, titleID, statusQueued, message))
 	}
@@ -499,21 +507,22 @@ func (r *Router) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 	return resp, nil
 }
 
-// seasonsHaveFiles reports whether every requested season has at least one
-// file in Scryer.
+// seasonsHaveFiles reports whether every requested season Scryer has got at
+// least one file. A season Scryer does not have (yet) is left out, as the
+// request leaves it out; with none of them in Scryer there is nothing to wait for.
 func seasonsHaveFiles(title *scryer.Title, seasons []int32) bool {
+	found := false
 	for _, n := range seasons {
-		owned := false
-		for _, col := range title.Collections {
-			if col.Index == strconv.Itoa(int(n)) && col.EpisodesOwned != nil && *col.EpisodesOwned > 0 {
-				owned = true
-			}
+		i := slices.IndexFunc(title.Collections, func(col scryer.Collection) bool { return col.Index == strconv.Itoa(int(n)) })
+		if i < 0 {
+			continue
 		}
-		if !owned {
+		found = true
+		if col := title.Collections[i]; col.EpisodesOwned == nil || *col.EpisodesOwned == 0 {
 			return false
 		}
 	}
-	return true
+	return found
 }
 
 func (r *Router) describe(st *pluginv1.TargetStatus, title *scryer.Title, seasons []int32) {
