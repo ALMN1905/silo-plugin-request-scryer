@@ -25,7 +25,7 @@ var (
 // DefaultBase is TMDB's API.
 const DefaultBase = "https://api.themoviedb.org"
 
-// Client calls TMDB with an API key (v3) or a read access token (v4).
+// Client calls TMDB with an API Read Access Token, which gives read access only.
 type Client struct {
 	HTTP    *http.Client
 	BaseURL string
@@ -47,13 +47,7 @@ func (c *Client) Seasons(ctx context.Context, tmdbID string) ([]seasonmap.Season
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(c.Key, "eyJ") { // a v4 read access token is a JWT
-		req.Header.Set("Authorization", "Bearer "+c.Key)
-	} else {
-		q := req.URL.Query()
-		q.Set("api_key", c.Key)
-		req.URL.RawQuery = q.Encode()
-	}
+	req.Header.Set("Authorization", "Bearer "+c.Key)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -89,3 +83,7 @@ func (c *Client) Seasons(ctx context.Context, tmdbID string) ([]seasonmap.Season
 	}
 	return seasons, nil
 }
+
+// IsReadToken reports whether key looks like an API Read Access Token. TMDB issues
+// them as JWTs, which start with "eyJ"; the API key, which is not read-only, does not.
+func IsReadToken(key string) bool { return strings.HasPrefix(strings.TrimSpace(key), "eyJ") }

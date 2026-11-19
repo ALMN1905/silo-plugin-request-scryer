@@ -57,7 +57,7 @@
               {
                 "key": "tmdb_api_key",
                 "label": "TMDB API key - Read Access Token",
-                "description": "The API key is REQUIRED for series and anime requests. Silo numbers seasons as TMDB does, and Scryer's seasons can differ (anime above all): with the key the plugin matches each requested season to Scryer's by air date and episode count.",
+                "description": "The API key is REQUIRED for series and anime requests, and only the Read Access Token is accepted (it starts with \"eyJ\" and can't change anything on TMDB). Silo numbers seasons as TMDB does, and Scryer's seasons can differ (anime above all): with the key the plugin matches each requested season to Scryer's by air date and episode count.",
                 "control": "ADMIN_FORM_CONTROL_PASSWORD",
                 "secret": true
               },

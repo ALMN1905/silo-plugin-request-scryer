@@ -279,7 +279,7 @@ func TestTestConnectionReportsARefusedKey(t *testing.T) {
 func withConfig(t *testing.T, conn *pluginv1.RouterConnection, cfg map[string]any) {
 	t.Helper()
 	if _, ok := cfg[configTMDBKey]; !ok {
-		merged := map[string]any{configTMDBKey: "key"}
+		merged := map[string]any{configTMDBKey: "eyJtest"}
 		for k, v := range cfg {
 			merged[k] = v
 		}
@@ -699,7 +699,7 @@ func TestSeriesRequestNeedsATMDBKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := resp.GetTargets()
-	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "TMDB API key") || fake.added != nil {
+	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "TMDB API Read Access Token") || fake.added != nil {
 		t.Fatalf("targets = %v, added = %v", got, fake.added)
 	}
 	// a movie does not need it
@@ -1184,5 +1184,74 @@ func TestMissingSeasonOfANewTitleDoesNotWait(t *testing.T) {
 	}
 	if fake.reads != 1 || !strings.Contains(targetMessage(t, resp), "Left out, not in Scryer: season 3") {
 		t.Fatalf("title reads = %d, message %q", fake.reads, targetMessage(t, resp))
+	}
+}
+
+// Only the API Read Access Token is accepted: it cannot change anything on TMDB,
+// the API key can. A key that is not a token fails the request and the form.
+func TestOnlyTheTMDBReadAccessTokenIsAccepted(t *testing.T) {
+	apiKey := "0123456789abcdef0123456789abcdef"
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTMDBKey: apiKey})
+	resp, err := fulfill(t, r, conn, seasonRequest(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.GetTargets()
+	if len(got) != 1 || got[0].GetStatus() != statusFailed || !strings.Contains(got[0].GetMessage(), "must be the API Read Access Token") || fake.added != nil {
+		t.Fatalf("targets = %v, added = %v", got, fake.added)
+	}
+	v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn})
+	if err != nil || v.GetFieldErrors()[configTMDBKey] == "" {
+		t.Fatalf("validate = %v, %v", v, err)
+	}
+	withConfig(t, conn, map[string]any{configTMDBKey: "eyJtoken"})
+	if v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn}); err != nil || len(v.GetFieldErrors()) != 0 {
+		t.Fatalf("a token must pass: %v, %v", v, err)
+	}
+}
+
+// The form refuses an empty key as well as an API key: without the token the
+// plugin cannot add a series.
+func TestFormRequiresTheTMDBToken(t *testing.T) {
+	r, conn := newTestRouter(t, &fakeScryer{})
+	for name, key := range map[string]string{"empty": "", "API key": "0123456789abcdef0123456789abcdef"} {
+		withConfig(t, conn, map[string]any{configTMDBKey: key})
+		if v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn}); err != nil || v.GetFieldErrors()[configTMDBKey] == "" {
+			t.Fatalf("%s: validate = %v, %v", name, v, err)
+		}
+	}
+}
+
+// A title TMDB does not know is not a setup problem: it fails the target.
+func TestTitleUnknownToTMDBFailsTheTarget(t *testing.T) {
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	r.tmdbBase = fakeTMDB(t, http.StatusNotFound, nil).URL
+	d := seasonRequest(1)
+	d.ExternalIds["tmdb"] = "1"
+	resp, err := fulfill(t, r, conn, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.GetTargets()
+	if len(got) != 1 || got[0].GetStatus() != statusFailed || fake.added != nil {
+		t.Fatalf("targets = %v, added = %v", got, fake.added)
+	}
+}
+
+// If Scryer has not loaded a new series' specials when the wait ends, the request
+// is not failed or retried for them: the title is already in place.
+func TestSpecialsNotLoadedYetDoNotFailTheRequest(t *testing.T) {
+	title := seasonTitle()
+	title["metadataFetchedAt"] = nil
+	fake := &fakeScryer{title: title, hydrateAfter: 1000}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configSeriesSpecials: true})
+	w := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Show", ExternalIds: map[string]string{"tvdb": "1"}}
+	resp, err := fulfill(t, r, conn, w)
+	if err != nil || len(resp.GetTargets()) != 1 || resp.GetTargets()[0].GetStatus() != statusQueued {
+		t.Fatalf("resp = %v, err = %v", resp, err)
 	}
 }

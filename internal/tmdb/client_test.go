@@ -20,18 +20,15 @@ func TestSeasons(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	seasons, err := New(srv.URL, "v3key").Seasons(context.Background(), "123249")
+	seasons, err := New(srv.URL, "eyJtoken").Seasons(context.Background(), "123249")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(seasons) != 2 || seasons[0].Number != 1 || seasons[0].Episodes != 24 || seasons[0].Start.Format("2006-01-02") != "2022-01-09" || !seasons[1].Start.IsZero() {
 		t.Fatalf("seasons = %+v (specials must be left out, a missing date stays zero)", seasons)
 	}
-	if gotKey != "v3key" || gotAuth != "" {
-		t.Fatalf("v3 key sent as api_key=%q auth=%q", gotKey, gotAuth)
-	}
-	if _, err := New(srv.URL, "eyJtoken").Seasons(context.Background(), "123249"); err != nil || gotAuth != "Bearer eyJtoken" || gotKey != "" {
-		t.Fatalf("v4 token: err=%v auth=%q api_key=%q", err, gotAuth, gotKey)
+	if gotAuth != "Bearer eyJtoken" || gotKey != "" {
+		t.Fatalf("token sent as auth=%q api_key=%q", gotAuth, gotKey)
 	}
 }
 
@@ -46,5 +43,13 @@ func TestSeasonsErrorsDoNotLeakTheKey(t *testing.T) {
 	defer refused.Close()
 	if _, err := New(refused.URL, "secret-key").Seasons(context.Background(), "1"); err == nil || !strings.Contains(err.Error(), "refused") || strings.Contains(err.Error(), "secret-key") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestIsReadToken(t *testing.T) {
+	for key, want := range map[string]bool{"eyJhbGciOi.payload.sig": true, " eyJabc ": true, "0123456789abcdef0123456789abcdef": false, "": false} {
+		if got := IsReadToken(key); got != want {
+			t.Errorf("IsReadToken(%q) = %v, want %v", key, got, want)
+		}
 	}
 }

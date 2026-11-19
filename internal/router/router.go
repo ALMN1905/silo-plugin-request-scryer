@@ -89,11 +89,13 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 
 	d := req.GetRequest()
 	series := d.GetMediaType() == "series"
-	if series && tmdbKey(conn) == "" {
-		for _, q := range qualities {
-			resp.Targets = append(resp.Targets, target(q, "", statusFailed, "Set a TMDB API key in the plugin settings: a series request needs it to match Silo's seasons to Scryer's."))
+	if series {
+		if msg := tmdbKeyProblem(tmdbKey(conn)); msg != "" {
+			for _, q := range qualities {
+				resp.Targets = append(resp.Targets, target(q, "", statusFailed, msg))
+			}
+			return resp, nil
 		}
-		return resp, nil
 	}
 
 	// A series request names the seasons wanted; one without any (TMDB lists no
@@ -326,6 +328,19 @@ func monitorSeriesSpecials(conn *pluginv1.RouterConnection) bool {
 // seasons as TMDB does, so a series request cannot be matched to Scryer's seasons
 // without it.
 const configTMDBKey = "tmdb_api_key"
+
+// tmdbKeyProblem says what is wrong with the TMDB key in the settings, or "". Only
+// the API Read Access Token is accepted: it reads and cannot change anything, as
+// the API key can.
+func tmdbKeyProblem(key string) string {
+	switch {
+	case key == "":
+		return "Set the TMDB API Read Access Token in the plugin settings: a series request needs it to match Silo's seasons to Scryer's."
+	case !tmdb.IsReadToken(key):
+		return "The TMDB key in the plugin settings must be the API Read Access Token (it starts with \"eyJ\"), not the API key."
+	}
+	return ""
+}
 
 func tmdbKey(conn *pluginv1.RouterConnection) string {
 	return strings.TrimSpace(conn.GetConfig().GetFields()[configTMDBKey].GetStringValue())
@@ -665,9 +680,13 @@ func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 	return resp, nil
 }
 
-// Validate accepts every server: the only library setting is a dropdown of
-// libraries that exist in Scryer, and one that has gone is handled when a
-// request is fulfilled.
-func (r *Router) Validate(context.Context, *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
-	return &pluginv1.ValidateResponse{}, nil
+// Validate checks the TMDB key: it is required, and only the API Read Access
+// Token is accepted. The anime movies library is not checked here; one that has
+// gone is handled when a request is fulfilled.
+func (r *Router) Validate(_ context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
+	resp := &pluginv1.ValidateResponse{}
+	if msg := tmdbKeyProblem(tmdbKey(req.GetConnection())); msg != "" {
+		resp.FieldErrors = map[string]string{configTMDBKey: msg}
+	}
+	return resp, nil
 }
