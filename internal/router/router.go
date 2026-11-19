@@ -145,22 +145,36 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		return resp
 	}
 
-	// The monitor type options of a whole-series add would replace the settings
-	// of a title Scryer already has, so such a title is looked for first and left
-	// as it is.
-	if whole {
-		id, err := client.FindTitle(ctx, input.Facet, d.GetExternalIds()["tmdb"])
+	// A title is looked for in all the libraries of its kind before it is added:
+	// Scryer matches existing titles within one library only, so a title Silo
+	// calls anime but Scryer keeps in the Series library (or the reverse), or an
+	// anime movie that is in the default movie library, would be added a second
+	// time and downloaded twice. The monitor type options of a whole-series add
+	// would also replace the settings of a title Scryer already has.
+	existing := ""
+	{
+		var id string
+		var err error
+		if series {
+			id, err = client.FindSeries(ctx, input.Facet, d.GetExternalIds()["tmdb"])
+		} else {
+			// Movies: every movie library, since an anime movie may already be in
+			// the default one.
+			id, err = client.FindTitle(ctx, input.Facet, d.GetExternalIds()["tmdb"])
+		}
 		switch {
 		case errors.As(err, &gqlErr):
 			return failed("", "Scryer could not look the title up: "+gqlErr.Error()), nil
 		case err != nil:
 			return nil, err
-		case id != "":
-			for _, q := range qualities {
-				resp.Targets = append(resp.Targets, target(q, id, statusQueued, "Already in Scryer; nothing to change."))
-			}
-			return resp, nil
 		}
+		existing = id
+	}
+	if whole && existing != "" {
+		for _, q := range qualities {
+			resp.Targets = append(resp.Targets, target(q, existing, statusQueued, "Already in Scryer; nothing to change."))
+		}
+		return resp, nil
 	}
 
 	// Scryer refuses a tag that is not defined, so define the tags first. A
@@ -181,12 +195,16 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	}
 	input.Tags = append(input.Tags, tags...)
 
-	added, err := client.AddTitle(ctx, input)
-	switch {
-	case errors.As(err, &gqlErr):
-		return failed("", "Scryer could not add it: "+gqlErr.Error()), nil
-	case err != nil:
-		return nil, err
+	added := scryer.AddedTitle{ID: existing, Reused: true}
+	if existing == "" {
+		var err error
+		added, err = client.AddTitle(ctx, input)
+		switch {
+		case errors.As(err, &gqlErr):
+			return failed("", "Scryer could not add it: "+gqlErr.Error()), nil
+		case err != nil:
+			return nil, err
+		}
 	}
 	titleID := added.ID
 

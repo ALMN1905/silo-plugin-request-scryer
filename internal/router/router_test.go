@@ -31,8 +31,10 @@ type fakeScryer struct {
 	libsErr   string // makes the libraries query fail
 	libsQuery string // the last libraries query sent
 
-	reused bool             // addTitle answers that it found the title
-	titles []map[string]any // the library, for the lookup by TMDB id
+	reused     bool             // addTitle answers that it found the title
+	titles     []map[string]any // the library, for the lookup by TMDB id
+	titlesIn   string           // the facet the library keeps them in; empty: any
+	findFacets []string         // the facets the lookup asked for
 
 	collectionCalls []string // "id:monitored" sent to setCollectionMonitored
 	episodeCalls    []string // ids sent to setEpisodeMonitored
@@ -116,8 +118,10 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"libraries": f.libs})
 	case strings.Contains(body.Query, "SiloFind"):
+		facet, _ := body.Variables["facet"].(string)
+		f.findFacets = append(f.findFacets, facet)
 		items := f.titles
-		if items == nil {
+		if items == nil || (f.titlesIn != "" && facet != f.titlesIn) {
 			items = []map[string]any{}
 		}
 		reply(map[string]any{"titles": map[string]any{"items": items, "hasMore": false}})
@@ -1063,5 +1067,79 @@ func TestUnreachableTagRegistryRetriesTheRequest(t *testing.T) {
 	}
 	if fake.added != nil {
 		t.Fatal("title added untagged while Scryer was unreachable")
+	}
+}
+
+// Scryer matches existing titles within one library, so a series Silo calls anime
+// but Scryer keeps in the Series library (or the reverse) is found there and not
+// added a second time.
+func TestSeriesIsLookedUpInBothLibrariesBeforeItIsAdded(t *testing.T) {
+	lib := []map[string]any{{"id": "t1", "externalIds": []map[string]string{{"source": "tmdb", "value": "100"}}}}
+	d := seasonRequest(1)
+	d.IsAnime = true
+	d.ExternalIds["tmdb"] = "100"
+	t.Run("kept in the other library: no second copy", func(t *testing.T) {
+		fake := &fakeScryer{titles: lib, titlesIn: "SERIES", title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, "2022-01-09"))}
+		r, conn := newTestRouter(t, fake)
+		r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 2}}).URL
+		withConfig(t, conn, map[string]any{configTagTitles: true})
+		resp, err := fulfill(t, r, conn, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fake.added != nil || calls(fake.findFacets) != "ANIME,SERIES" {
+			t.Fatalf("added = %v, lookups = %v", fake.added, fake.findFacets)
+		}
+		if calls(fake.episodeCalls) != "s1e1,s1e2" || !strings.HasPrefix(targetMessage(t, resp), "Monitored in Scryer") || len(fake.tagged) == 0 {
+			t.Fatalf("episodes %v, message %q, tagged %v", fake.episodeCalls, targetMessage(t, resp), fake.tagged)
+		}
+	})
+	t.Run("whole series, kept in the other library", func(t *testing.T) {
+		fake := &fakeScryer{titles: lib, titlesIn: "SERIES"}
+		r, conn := newTestRouter(t, fake)
+		w := &pluginv1.RequestDescriptor{MediaType: "series", Title: "Show", IsAnime: true, ExternalIds: map[string]string{"tmdb": "100"}}
+		resp, err := fulfill(t, r, conn, w)
+		if err != nil || fake.added != nil || targetMessage(t, resp) != "Already in Scryer; nothing to change." {
+			t.Fatalf("err = %v, added = %v, message %q", err, fake.added, targetMessage(t, resp))
+		}
+	})
+	t.Run("in neither: added in the facet Silo names", func(t *testing.T) {
+		fake := &fakeScryer{title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, "2022-01-09"))}
+		r, conn := newTestRouter(t, fake)
+		r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 2}}).URL
+		if _, err := fulfill(t, r, conn, d); err != nil {
+			t.Fatal(err)
+		}
+		if fake.added["facet"] != "ANIME" {
+			t.Fatalf("added = %v", fake.added)
+		}
+	})
+}
+
+// An anime movie that is already in another movie library (the default one, say)
+// is found there and not added to the chosen library a second time.
+func TestMovieIsLookedUpInAllMovieLibrariesBeforeItIsAdded(t *testing.T) {
+	lib := []map[string]any{{"id": "t1", "externalIds": []map[string]string{{"source": "tmdb", "value": "372058"}}}}
+	for name, tc := range map[string]struct {
+		title    map[string]any
+		searches int
+		titles   string
+		message  string
+	}{
+		"with a file":    {movieTitle(false, true), 0, "", "Already in Scryer; nothing to change."},
+		"without a file": {movieTitle(false, false), 1, "t1", "Monitored in Scryer"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{titles: lib, title: tc.title, libs: []map[string]any{{"id": "anime-movies", "name": "Anime Movies"}}}
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, map[string]any{configAnimeMoviesLibrary: "anime-movies"})
+			resp, err := fulfill(t, r, conn, animeMovie())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.added != nil || calls(fake.findFacets) != "MOVIE" || fake.searches != tc.searches || calls(fake.titleCalls) != tc.titles || !strings.HasPrefix(targetMessage(t, resp), tc.message) {
+				t.Fatalf("added = %v, lookups = %v, searches %d, monitored %v, message %q", fake.added, fake.findFacets, fake.searches, fake.titleCalls, targetMessage(t, resp))
+			}
+		})
 	}
 }

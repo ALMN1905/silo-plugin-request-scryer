@@ -43,7 +43,7 @@
               {
                 "key": "anime_movies_library",
                 "label": "Anime movies library",
-                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
+                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
                 "dynamic_options": true
               },

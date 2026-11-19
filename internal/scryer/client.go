@@ -307,6 +307,22 @@ func (c *Client) FindTitle(ctx context.Context, facet, tmdbID string) (string, e
 	}
 }
 
+// FindSeries is FindTitle for a series or anime: it looks in the library of the
+// given facet first, then in the other one (SERIES or ANIME).
+func (c *Client) FindSeries(ctx context.Context, facet, tmdbID string) (string, error) {
+	other := "SERIES"
+	if facet == "SERIES" {
+		other = "ANIME"
+	}
+	for _, f := range []string{facet, other} {
+		id, err := c.FindTitle(ctx, f, tmdbID)
+		if err != nil || id != "" {
+			return id, err
+		}
+	}
+	return "", nil
+}
+
 // Search starts Scryer's automatic search for a title.
 func (c *Client) Search(ctx context.Context, titleID string) error {
 	const q = `mutation SiloSearch($input: TriggerAcquisitionSearchInput!) { triggerAcquisitionSearch(input: $input) { id } }`
