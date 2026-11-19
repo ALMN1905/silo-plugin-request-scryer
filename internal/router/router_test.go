@@ -24,6 +24,13 @@ type fakeScryer struct {
 	libs      []map[string]any
 	libsErr   string // makes the libraries query fail
 	libsQuery string // the last libraries query sent
+
+	tagDefs       []string // labels already in the tag registry
+	tagCreateErr  string   // makes creating a tag definition fail
+	reused        bool     // addTitle answers that it found the title
+	tagged        []string // labels sent to updateTitleTags
+	tagCreateRace bool     // another request defines the tag just first: create fails, the label exists
+	tagsDown      bool     // the tag list answers 503, as when Scryer is restarting
 }
 
 func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +57,32 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.added = body.Variables["input"].(map[string]any)
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"addTitle": map[string]any{"title": map[string]any{"id": "t1"}, "reusedExistingTitle": f.reused}}})
+	case strings.Contains(body.Query, "titleTagDefinitions") && f.tagsDown:
+		w.WriteHeader(http.StatusServiceUnavailable)
+	case strings.Contains(body.Query, "titleTagDefinitions"):
+		defs := []map[string]string{}
+		for _, l := range f.tagDefs {
+			defs = append(defs, map[string]string{"label": l})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"titleTagDefinitions": defs}})
+	case strings.Contains(body.Query, "createTitleTagDefinition"):
+		if f.tagCreateRace {
+			f.tagDefs = append(f.tagDefs, body.Variables["input"].(map[string]any)["label"].(string))
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": "tag already exists"}}})
+			return
+		}
+		if f.tagCreateErr != "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.tagCreateErr}}})
+			return
+		}
+		f.tagDefs = append(f.tagDefs, body.Variables["input"].(map[string]any)["label"].(string))
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"createTitleTagDefinition": map[string]any{"__typename": "TitleTagDefinitionMutationPayload"}}})
+	case strings.Contains(body.Query, "updateTitleTags"):
+		for _, l := range body.Variables["input"].(map[string]any)["add"].([]any) {
+			f.tagged = append(f.tagged, l.(string))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"updateTitleTags": []map[string]any{{"id": "t1"}}}})
 	case strings.Contains(body.Query, "libraries("):
 		f.libsQuery = body.Query
 		if f.libsErr != "" {
@@ -389,5 +421,185 @@ func TestAnimeMovieLibraryLookupRetriesWhenScryerIsUnreachable(t *testing.T) {
 	conn.BaseUrl = "http://127.0.0.1:1/"
 	if _, err := fulfill(t, r, conn, animeMovie()); err == nil {
 		t.Fatal("Fulfill succeeded with Scryer unreachable")
+	}
+}
+
+func tagsOf(added map[string]any) []string {
+	var out []string
+	for _, t := range added["tags"].([]any) {
+		out = append(out, t.(string))
+	}
+	return out
+}
+
+func TestRequestTagsAreCreatedAndSentWithANewTitle(t *testing.T) {
+	fake := &fakeScryer{tagDefs: []string{"silo-request"}}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	d := &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "Ana Maria", ExternalIds: map[string]string{"tmdb": "348"}}
+	if _, err := fulfill(t, r, conn, d); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request,silo-user-ana-maria" {
+		t.Fatalf("tags = %s", got)
+	}
+	if len(fake.tagDefs) != 2 || fake.tagDefs[1] != "silo-user-ana-maria" {
+		t.Fatalf("registry = %v, want the missing user tag created and silo-request left alone", fake.tagDefs)
+	}
+	if len(fake.tagged) != 0 {
+		t.Fatalf("a new title was tagged again: %v", fake.tagged)
+	}
+}
+
+func TestRequestWithoutUsernameGetsOnlyTheCommonTag(t *testing.T) {
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request" {
+		t.Fatalf("tags = %s", got)
+	}
+}
+
+// Scryer ignores the tags of an addTitle that finds the title in the library,
+// so they are applied with updateTitleTags, but only if the admin allows it.
+func TestExistingTitleIsTaggedOnlyWhenAllowed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  map[string]any
+		want string
+	}{
+		"allowed":     {map[string]any{configTagTitles: true, configTagExistingTitles: true}, "silo-request,silo-user-ana"},
+		"not allowed": {map[string]any{configTagTitles: true}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: true}
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, tc.cfg)
+			d := &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}
+			if _, err := fulfill(t, r, conn, d); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(fake.tagged, ","); got != tc.want {
+				t.Fatalf("updateTitleTags add = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A refused tag creation must not lose the request.
+func TestTitleIsAddedWithoutTagsWhenTheyCannotBeCreated(t *testing.T) {
+	fake := &fakeScryer{tagCreateErr: "permission denied"}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	resp, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resp.GetTargets()
+	if len(got) != 1 || got[0].GetStatus() != statusQueued || !strings.Contains(got[0].GetMessage(), "Not tagged") {
+		t.Fatalf("targets = %v", got)
+	}
+	if len(tagsOf(fake.added)) != 0 {
+		t.Fatalf("tags sent although they could not be created: %v", fake.added["tags"])
+	}
+}
+
+// Like every setting the plugin adds, tagging does nothing until it is chosen.
+func TestTaggingIsOffByDefault(t *testing.T) {
+	fake := &fakeScryer{}
+	r, conn := newTestRouter(t, fake)
+	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tagsOf(fake.added)) != 0 || len(fake.tagDefs) != 0 {
+		t.Fatalf("tagging happened while off: tags %v, registry %v", fake.added["tags"], fake.tagDefs)
+	}
+}
+
+// One tag that cannot be defined must not cost the title the others.
+func TestTagsThatExistAreKeptWhenAnotherCannotBeCreated(t *testing.T) {
+	fake := &fakeScryer{tagDefs: []string{"silo-request"}, tagCreateErr: "permission denied"}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	resp, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request" {
+		t.Fatalf("tags = %q, want silo-request kept", got)
+	}
+	if msg := resp.GetTargets()[0].GetMessage(); !strings.Contains(msg, "silo-user-ana") {
+		t.Fatalf("message does not name the dropped tag: %q", msg)
+	}
+}
+
+// Two requests from a new user define the same tag at once; the one that
+// loses the race still tags its title.
+func TestTagDefinedByAConcurrentRequestIsUsed(t *testing.T) {
+	fake := &fakeScryer{tagDefs: []string{"silo-request"}, tagCreateRace: true}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(tagsOf(fake.added), ","); got != "silo-request,silo-user-ana" {
+		t.Fatalf("tags = %q", got)
+	}
+}
+
+// Silo usernames are free text and can be email addresses: the tag keeps
+// to letters, digits and dashes, never carries an address, and falls back
+// to the account id when nothing usable is left.
+func TestUserTagIsSafeForAnyUsername(t *testing.T) {
+	for name, want := range map[string]string{
+		"Ana Maria":             "silo-user-ana-maria",
+		"ana.maria@example.com": "silo-user-ana-maria",
+		"Zoë O'Brien":           "silo-user-zo-o-brien",
+		"  --Bob__--  ":         "silo-user-bob",
+		"!!!":                   "silo-user-7",
+		"":                      "",
+	} {
+		d := &pluginv1.RequestDescriptor{RequesterUsername: name, RequesterUserId: 7}
+		if name == "" {
+			d.RequesterUserId = 0
+		}
+		got := userTag(d)
+		if got != want {
+			t.Errorf("userTag(%q) = %q, want %q", name, got, want)
+		}
+	}
+	long := userTag(&pluginv1.RequestDescriptor{RequesterUsername: strings.Repeat("a", 100)})
+	if len(long) > len("silo-user-")+maxUserTagLength {
+		t.Errorf("tag not capped: %d chars", len(long))
+	}
+}
+
+// Scryer may store a label in another case; it is still the same tag.
+func TestExistingTagMatchesWhateverItsCase(t *testing.T) {
+	fake := &fakeScryer{tagDefs: []string{"Silo-Request", "SILO-USER-ANA"}, tagCreateErr: "should not be called"}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	resp, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(resp.GetTargets()[0].GetMessage(), "Not tagged") || len(tagsOf(fake.added)) != 2 {
+		t.Fatalf("existing tags not recognised: %v, %q", fake.added["tags"], resp.GetTargets()[0].GetMessage())
+	}
+}
+
+// Scryer briefly unreachable while tags are checked: Silo retries the
+// request rather than the title being added untagged for good.
+func TestUnreachableTagRegistryRetriesTheRequest(t *testing.T) {
+	fake := &fakeScryer{tagsDown: true}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTagTitles: true})
+	if _, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", RequesterUsername: "ana"}); err == nil {
+		t.Fatal("Fulfill succeeded while the tag registry was unreachable")
+	}
+	if fake.added != nil {
+		t.Fatal("title added untagged while Scryer was unreachable")
 	}
 }

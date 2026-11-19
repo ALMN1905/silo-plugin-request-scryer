@@ -132,24 +132,102 @@ func (c *Client) LibraryID(ctx context.Context, facet, id string) (string, error
 	return "", fmt.Errorf("%w: %q", ErrLibraryNotFound, id)
 }
 
-// AddTitle creates the title, or reuses it when Scryer already has it, and
-// returns its ID.
-func (c *Client) AddTitle(ctx context.Context, in AddTitle) (string, error) {
+// AddedTitle is the result of AddTitle.
+type AddedTitle struct {
+	ID string
+	// Reused is true when the target library already had the title. Scryer
+	// then ignores the tags sent with the add, so they have to be applied with
+	// UpdateTitleTags.
+	Reused bool
+}
+
+// AddTitle creates the title, or reuses it when Scryer already has it in the
+// target library, and returns its ID.
+func (c *Client) AddTitle(ctx context.Context, in AddTitle) (AddedTitle, error) {
 	var out struct {
 		AddTitle struct {
 			Title struct {
 				ID string `json:"id"`
 			} `json:"title"`
+			Reused bool `json:"reusedExistingTitle"`
 		} `json:"addTitle"`
 	}
 	const q = `mutation SiloAddTitle($input: AddTitleInput!) { addTitle(input: $input) { title { id } reusedExistingTitle } }`
 	if err := c.do(ctx, q, map[string]any{"input": in}, &out); err != nil {
-		return "", err
+		return AddedTitle{}, err
 	}
 	if out.AddTitle.Title.ID == "" {
-		return "", errors.New("scryer returned no title id")
+		return AddedTitle{}, errors.New("scryer returned no title id")
 	}
-	return out.AddTitle.Title.ID, nil
+	return AddedTitle{ID: out.AddTitle.Title.ID, Reused: out.AddTitle.Reused}, nil
+}
+
+// EnsureTags makes sure each label is defined in Scryer's title-tag registry
+// and returns the labels to send, spelled as the registry has them, and the
+// labels Scryer would not define. Scryer refuses addTitle for an undefined
+// tag, and defining one needs the catalog-settings permission, so one label
+// that cannot be defined is dropped on its own; the others are still used.
+// A label another request defined at the same moment counts as defined. Only
+// a failure to reach Scryer is returned as an error, so the caller can retry
+// the whole request rather than add the title untagged.
+func (c *Client) EnsureTags(ctx context.Context, labels []string) (use, dropped []string, err error) {
+	have, err := c.tagDefinitions(ctx)
+	var gqlErr *GraphQLError
+	if errors.As(err, &gqlErr) {
+		return nil, labels, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	const q = `mutation SiloCreateTag($input: CreateTitleTagDefinitionInput!) { createTitleTagDefinition(input: $input) { __typename } }`
+	for _, label := range labels {
+		if stored, ok := have[strings.ToLower(label)]; ok {
+			use = append(use, stored)
+			continue
+		}
+		in := map[string]any{"label": label, "description": "Added by the Silo request plugin"}
+		err := c.do(ctx, q, map[string]any{"input": in}, &struct{}{})
+		if err != nil && !errors.As(err, &gqlErr) {
+			return nil, nil, err
+		}
+		if err != nil {
+			// Refused, or defined by a concurrent request first: look again.
+			if have, err = c.tagDefinitions(ctx); err != nil && !errors.As(err, &gqlErr) {
+				return nil, nil, err
+			}
+			if stored, ok := have[strings.ToLower(label)]; ok {
+				use = append(use, stored)
+				continue
+			}
+			dropped = append(dropped, label)
+			continue
+		}
+		use = append(use, label)
+	}
+	return use, dropped, nil
+}
+
+// tagDefinitions returns the registry's labels keyed by their lowercase form.
+func (c *Client) tagDefinitions(ctx context.Context) (map[string]string, error) {
+	var out struct {
+		Definitions []struct {
+			Label string `json:"label"`
+		} `json:"titleTagDefinitions"`
+	}
+	if err := c.do(ctx, `query SiloTags { titleTagDefinitions { label } }`, nil, &out); err != nil {
+		return nil, err
+	}
+	have := make(map[string]string, len(out.Definitions))
+	for _, d := range out.Definitions {
+		have[strings.ToLower(d.Label)] = d.Label
+	}
+	return have, nil
+}
+
+// UpdateTitleTags adds already defined tags to a title.
+func (c *Client) UpdateTitleTags(ctx context.Context, titleID string, add []string) error {
+	const q = `mutation SiloTagTitle($input: UpdateTitleTagsInput!) { updateTitleTags(input: $input) { id } }`
+	return c.do(ctx, q, map[string]any{"input": map[string]any{"titleIds": []string{titleID}, "add": add}}, &struct{}{})
 }
 
 // Search starts Scryer's automatic search for a title.
