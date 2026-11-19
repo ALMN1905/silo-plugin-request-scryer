@@ -424,6 +424,15 @@ func (c *Client) MonitorSeasons(ctx context.Context, titleID string, seasons []i
 			}
 			changed = true
 		default:
+			// A season with no episodes yet (an upcoming one) has nothing to
+			// monitor one by one: monitoring the season itself, and so the title,
+			// is what makes its episodes download once they appear.
+			if len(col.Episodes) == 0 && !col.Monitored {
+				if err := c.setCollectionMonitored(ctx, col.ID, true); err != nil {
+					return changed, missing, err
+				}
+				changed = true
+			}
 			for _, e := range col.Episodes {
 				if len(e.MediaFiles) > 0 || e.Monitored {
 					continue

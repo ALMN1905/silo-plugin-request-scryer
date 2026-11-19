@@ -1116,6 +1116,32 @@ func TestSeriesIsLookedUpInBothLibrariesBeforeItIsAdded(t *testing.T) {
 	})
 }
 
+// An upcoming season of a title Scryer already has has no episodes to monitor one
+// by one: the season itself is monitored, which also monitors the title, so its
+// episodes download once they appear. One already monitored is left alone.
+func TestUpcomingSeasonOfAnExistingTitleIsMonitored(t *testing.T) {
+	for name, tc := range map[string]struct {
+		flag bool
+		want string
+	}{"flag off": {false, "s2:true"}, "flag on": {true, ""}} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: true, title: seasonTitle(season("s1", "SEASON", "1", true, 2, 2, 0, ""), season("s2", "SEASON", "2", tc.flag, 0, 0, 0, ""))}
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, map[string]any{configTagTitles: true})
+			resp, err := fulfill(t, r, conn, seasonRequest(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := calls(fake.collectionCalls); got != tc.want || len(fake.episodeCalls) != 0 {
+				t.Fatalf("collection calls = %q, episode calls = %v", got, fake.episodeCalls)
+			}
+			if (tc.want != "") != (len(fake.tagged) > 0) || (tc.want != "") != strings.HasPrefix(targetMessage(t, resp), "Monitored in Scryer") {
+				t.Fatalf("tagged %v, message %q", fake.tagged, targetMessage(t, resp))
+			}
+		})
+	}
+}
+
 // An anime movie that is already in another movie library (the default one, say)
 // is found there and not added to the chosen library a second time.
 func TestMovieIsLookedUpInAllMovieLibrariesBeforeItIsAdded(t *testing.T) {
