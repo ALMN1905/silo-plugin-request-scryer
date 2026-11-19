@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -96,15 +97,21 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 
-	// Scryer refuses a tag that is not defined, so define the tags first; if
-	// that fails the title is still added, without them.
+	// Scryer refuses a tag that is not defined, so define the tags first. A
+	// tag Scryer will not define is left off and the others are still used;
+	// Scryer being unreachable retries the request instead, so the title is
+	// not added untagged for good.
 	tags := requestTags(conn, req.GetRequest())
 	var tagNote string
 	if len(tags) > 0 {
-		if err := client.EnsureTags(ctx, tags); err != nil {
-			tagNote = " Not tagged: " + err.Error() + "."
-			tags = nil
+		use, dropped, err := client.EnsureTags(ctx, tags)
+		if err != nil {
+			return nil, err
 		}
+		if len(dropped) > 0 {
+			tagNote = " Not tagged " + strings.Join(dropped, ", ") + ": Scryer would not define the tag (the API key needs the catalog-settings permission)."
+		}
+		tags = use
 	}
 	input.Tags = append(input.Tags, tags...)
 
@@ -128,7 +135,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	// but addTitle itself says whether it reused one.
 	if added.Reused && len(tags) > 0 && tagExistingTitles(conn) {
 		if err := client.UpdateTitleTags(ctx, titleID, tags); err != nil {
-			tagNote = " Not tagged: " + err.Error() + "."
+			tagNote = " Not tagged: " + shorten(err.Error(), 200) + "."
 		}
 	}
 
@@ -209,10 +216,62 @@ func requestTags(conn *pluginv1.RouterConnection, d *pluginv1.RequestDescriptor)
 		return nil
 	}
 	tags := []string{"silo-request"}
-	if user := strings.Join(strings.Fields(strings.ToLower(d.GetRequesterUsername())), "-"); user != "" {
-		tags = append(tags, "silo-user-"+user)
+	if user := userTag(d); user != "" {
+		tags = append(tags, user)
 	}
 	return tags
+}
+
+// maxUserTagLength caps the username part of a requester tag.
+const maxUserTagLength = 40
+
+// userTag returns the requester's tag, silo-user-<name>, or "" when the
+// request names nobody. Silo usernames are free text and can be email
+// addresses, so the name keeps to lowercase letters, digits and single
+// dashes, an address is cut at the @ so it never ends up in Scryer, and a
+// name with nothing usable left falls back to the Silo account id. The tag
+// names the account: every profile on it shares the tag, and renaming the
+// account starts a new one.
+func userTag(d *pluginv1.RequestDescriptor) string {
+	name := strings.ToLower(strings.TrimSpace(d.GetRequesterUsername()))
+	if at := strings.IndexByte(name, '@'); at > 0 {
+		name = name[:at]
+	}
+	var b strings.Builder
+	dash := false
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			dash = false
+		case !dash && b.Len() > 0:
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > maxUserTagLength {
+		slug = strings.TrimRight(slug[:maxUserTagLength], "-")
+	}
+	if slug == "" {
+		id := d.GetRequesterUserId()
+		if id <= 0 {
+			return ""
+		}
+		slug = strconv.FormatInt(id, 10)
+	}
+	return "silo-user-" + slug
+}
+
+// shorten cuts s to at most n bytes, on a rune boundary.
+func shorten(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
 
 func addTitleInput(d *pluginv1.RequestDescriptor, monitorType string) scryer.AddTitle {

@@ -162,34 +162,66 @@ func (c *Client) AddTitle(ctx context.Context, in AddTitle) (AddedTitle, error) 
 	return AddedTitle{ID: out.AddTitle.Title.ID, Reused: out.AddTitle.Reused}, nil
 }
 
-// EnsureTags makes sure every label is defined in Scryer's title-tag registry.
-// Scryer refuses addTitle for a tag that is not defined, and defining one needs
-// the catalog-settings permission, so a failure here is the caller's cue to
-// add the title without tags.
-func (c *Client) EnsureTags(ctx context.Context, labels []string) error {
+// EnsureTags makes sure each label is defined in Scryer's title-tag registry
+// and returns the labels to send, spelled as the registry has them, and the
+// labels Scryer would not define. Scryer refuses addTitle for an undefined
+// tag, and defining one needs the catalog-settings permission, so one label
+// that cannot be defined is dropped on its own; the others are still used.
+// A label another request defined at the same moment counts as defined. Only
+// a failure to reach Scryer is returned as an error, so the caller can retry
+// the whole request rather than add the title untagged.
+func (c *Client) EnsureTags(ctx context.Context, labels []string) (use, dropped []string, err error) {
+	have, err := c.tagDefinitions(ctx)
+	var gqlErr *GraphQLError
+	if errors.As(err, &gqlErr) {
+		return nil, labels, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	const q = `mutation SiloCreateTag($input: CreateTitleTagDefinitionInput!) { createTitleTagDefinition(input: $input) { __typename } }`
+	for _, label := range labels {
+		if stored, ok := have[strings.ToLower(label)]; ok {
+			use = append(use, stored)
+			continue
+		}
+		in := map[string]any{"label": label, "description": "Added by the Silo request plugin"}
+		err := c.do(ctx, q, map[string]any{"input": in}, &struct{}{})
+		if err != nil && !errors.As(err, &gqlErr) {
+			return nil, nil, err
+		}
+		if err != nil {
+			// Refused, or defined by a concurrent request first: look again.
+			if have, err = c.tagDefinitions(ctx); err != nil && !errors.As(err, &gqlErr) {
+				return nil, nil, err
+			}
+			if stored, ok := have[strings.ToLower(label)]; ok {
+				use = append(use, stored)
+				continue
+			}
+			dropped = append(dropped, label)
+			continue
+		}
+		use = append(use, label)
+	}
+	return use, dropped, nil
+}
+
+// tagDefinitions returns the registry's labels keyed by their lowercase form.
+func (c *Client) tagDefinitions(ctx context.Context) (map[string]string, error) {
 	var out struct {
 		Definitions []struct {
 			Label string `json:"label"`
 		} `json:"titleTagDefinitions"`
 	}
 	if err := c.do(ctx, `query SiloTags { titleTagDefinitions { label } }`, nil, &out); err != nil {
-		return err
+		return nil, err
 	}
-	have := map[string]bool{}
+	have := make(map[string]string, len(out.Definitions))
 	for _, d := range out.Definitions {
-		have[d.Label] = true
+		have[strings.ToLower(d.Label)] = d.Label
 	}
-	const q = `mutation SiloCreateTag($input: CreateTitleTagDefinitionInput!) { createTitleTagDefinition(input: $input) { __typename } }`
-	for _, label := range labels {
-		if have[label] {
-			continue
-		}
-		in := map[string]any{"label": label, "description": "Added by the Silo request plugin"}
-		if err := c.do(ctx, q, map[string]any{"input": in}, &struct{}{}); err != nil {
-			return fmt.Errorf("create tag %q: %w", label, err)
-		}
-	}
-	return nil
+	return have, nil
 }
 
 // UpdateTitleTags adds already defined tags to a title.

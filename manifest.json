@@ -79,7 +79,7 @@
               {
                 "key": "tag_titles",
                 "label": "Tag titles with the requester",
-                "description": "Adds the tags silo-request and silo-user-<username> to every title the plugin adds, so Silo requests can be filtered and managed together. The tags are created in Scryer when missing; if that is not allowed, the title is added without them.",
+                "description": "Adds the tags silo-request and silo-user-<username> to every title the plugin adds, so Silo requests can be filtered and managed together. The user tag names the Silo account (shared by its profiles), using only letters, digits and dashes. Missing tags are created in Scryer; one it will not create is left off and the others are still used.",
                 "control": "ADMIN_FORM_CONTROL_SWITCH",
                 "default_value": false
               },
