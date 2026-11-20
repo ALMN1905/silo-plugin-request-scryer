@@ -51,8 +51,8 @@ func (c *Client) Seasons(ctx context.Context, tmdbID string) ([]seasonmap.Season
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		// The URL carries the key for a v3 key: report without it.
-		return nil, ErrUnreachable
+		// The token travels in a header, so the cause can be reported.
+		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 	defer resp.Body.Close()
 	switch {

@@ -36,6 +36,7 @@ type fakeScryer struct {
 	titles     []map[string]any // the library, for the lookup by TMDB id
 	titlesIn   string           // the facet the library keeps them in; empty: any
 	findFacets []string         // the facets the lookup asked for
+	findErr    string           // makes the lookup by TMDB id fail
 
 	collectionCalls []string // "id:monitored" sent to setCollectionMonitored
 	episodeCalls    []string // ids sent to setEpisodeMonitored
@@ -118,6 +119,8 @@ func (f *fakeScryer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(map[string]any{"libraries": f.libs})
+	case strings.Contains(body.Query, "SiloFind") && f.findErr != "":
+		_ = json.NewEncoder(w).Encode(map[string]any{"errors": []map[string]string{{"message": f.findErr}}})
 	case strings.Contains(body.Query, "SiloFind"):
 		facet, _ := body.Variables["facet"].(string)
 		f.findFacets = append(f.findFacets, facet)
@@ -536,7 +539,7 @@ func TestMovieRequests(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fake := &fakeScryer{reused: tc.reused, title: tc.title}
 			r, conn := newTestRouter(t, fake)
-			withConfig(t, conn, map[string]any{configTagTitles: true})
+			withConfig(t, conn, map[string]any{configTagTitles: true, configTagExistingTitles: true})
 			resp, err := fulfill(t, r, conn, d)
 			if err != nil {
 				t.Fatal(err)
@@ -623,7 +626,7 @@ func TestRequestedSeasonsOfAnExistingTitleSwitchOnOnlyWhatIsMissing(t *testing.T
 		season("s3", "SEASON", "3", false, 3, 0, 0, ""),
 	)}
 	r, conn := newTestRouter(t, fake)
-	withConfig(t, conn, map[string]any{configTagTitles: true, configSeriesSpecials: true})
+	withConfig(t, conn, map[string]any{configTagTitles: true, configTagExistingTitles: true, configSeriesSpecials: true})
 	d := seasonRequest(1, 2)
 	d.RequesterUsername = "ana"
 	resp, err := fulfill(t, r, conn, d)
@@ -870,7 +873,8 @@ func TestCheckStatusUsesTheMatchedSeasons(t *testing.T) {
 		want  string
 	}{
 		"only one of the two seasons has files": {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 0, 2, "2025-01-06")), statusQueued},
-		"both have files":                       {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 1, 2, "2025-01-06")), statusCompleted},
+		"one has only part of its episodes":     {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 1, 2, "2025-01-06")), statusQueued},
+		"both have all their episodes":          {seasonTitle(season("c1", "SEASON", "1", true, 2, 2, 2, "2022-01-09"), season("c2", "SEASON", "2", true, 2, 2, 2, "2025-01-06")), statusCompleted},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, conn := newTestRouter(t, &fakeScryer{title: tc.title})
@@ -899,7 +903,7 @@ func TestCheckStatusCompletesOnlyWhenTheRequestedSeasonsHaveFiles(t *testing.T) 
 		seasons []int32
 		want    string
 	}{
-		"season 1 has files":                 {[]int32{1}, statusCompleted},
+		"season 1 has all its episodes":      {[]int32{1}, statusCompleted},
 		"season 2 has none":                  {[]int32{2}, statusQueued},
 		"one of two requested has none":      {[]int32{1, 2}, statusQueued},
 		"no seasons: any file of the title":  {nil, statusCompleted},
@@ -907,7 +911,7 @@ func TestCheckStatusCompletesOnlyWhenTheRequestedSeasonsHaveFiles(t *testing.T) 
 		"none of the requested is in Scryer": {[]int32{5}, statusQueued},
 	} {
 		t.Run(name, func(t *testing.T) {
-			title := seasonTitle(season("s1", "SEASON", "1", true, 2, 1, 2, ""), season("s2", "SEASON", "2", true, 2, 0, 2, ""))
+			title := seasonTitle(season("s1", "SEASON", "1", true, 2, 2, 2, ""), season("s2", "SEASON", "2", true, 2, 0, 2, ""))
 			r, conn := newTestRouter(t, &fakeScryer{title: title})
 			resp, err := r.CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
 				Request:     seasonRequest(tc.seasons...),
@@ -1083,7 +1087,7 @@ func TestSeriesIsLookedUpInBothLibrariesBeforeItIsAdded(t *testing.T) {
 		fake := &fakeScryer{titles: lib, titlesIn: "SERIES", title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, "2022-01-09"))}
 		r, conn := newTestRouter(t, fake)
 		r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 2}}).URL
-		withConfig(t, conn, map[string]any{configTagTitles: true})
+		withConfig(t, conn, map[string]any{configTagTitles: true, configTagExistingTitles: true})
 		resp, err := fulfill(t, r, conn, d)
 		if err != nil {
 			t.Fatal(err)
@@ -1128,7 +1132,7 @@ func TestUpcomingSeasonOfAnExistingTitleIsMonitored(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fake := &fakeScryer{reused: true, title: seasonTitle(season("s1", "SEASON", "1", true, 2, 2, 0, ""), season("s2", "SEASON", "2", tc.flag, 0, 0, 0, ""))}
 			r, conn := newTestRouter(t, fake)
-			withConfig(t, conn, map[string]any{configTagTitles: true})
+			withConfig(t, conn, map[string]any{configTagTitles: true, configTagExistingTitles: true})
 			resp, err := fulfill(t, r, conn, seasonRequest(2))
 			if err != nil {
 				t.Fatal(err)
@@ -1204,15 +1208,17 @@ func TestOnlyTheTMDBReadAccessTokenIsAccepted(t *testing.T) {
 	}
 }
 
-// The form refuses an empty key as well as an API key: without the token the
-// plugin cannot add a series.
-func TestFormRequiresTheTMDBToken(t *testing.T) {
+// The token is optional: an empty one saves (series then use Silo's season
+// numbers as they are); an API key is still refused.
+func TestFormAcceptsAnEmptyTMDBTokenButNotAnAPIKey(t *testing.T) {
 	r, conn := newTestRouter(t, &fakeScryer{})
-	for name, key := range map[string]string{"empty": "", "API key": "0123456789abcdef0123456789abcdef"} {
-		withConfig(t, conn, map[string]any{configTMDBKey: key})
-		if v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn}); err != nil || v.GetFieldErrors()[configTMDBKey] == "" {
-			t.Fatalf("%s: validate = %v, %v", name, v, err)
-		}
+	withConfig(t, conn, map[string]any{configTMDBKey: ""})
+	if v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn}); err != nil || len(v.GetFieldErrors()) != 0 {
+		t.Fatalf("empty: validate = %v, %v", v, err)
+	}
+	withConfig(t, conn, map[string]any{configTMDBKey: "0123456789abcdef0123456789abcdef"})
+	if v, err := r.Validate(context.Background(), &pluginv1.ValidateRequest{Connection: conn}); err != nil || v.GetFieldErrors()[configTMDBKey] == "" {
+		t.Fatalf("API key: validate = %v, %v", v, err)
 	}
 }
 
@@ -1269,5 +1275,96 @@ func TestNewTitleStillLoadingAfterTheWaitIsRetried(t *testing.T) {
 	r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "", 2}}).URL
 	if _, err := fulfill(t, r, conn, d); err != nil || calls(fake.episodeCalls) != "s1e1,s1e2" {
 		t.Fatalf("retry: err = %v, episodes %v", err, fake.episodeCalls)
+	}
+}
+
+// Hardening from review.
+
+// With no token the request still goes through, using Silo's season numbers
+// as they are, and TMDB is not called at all.
+func TestSeriesRequestWithoutATMDBTokenUsesSilosSeasonNumbers(t *testing.T) {
+	fake := &fakeScryer{title: seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""), season("s2", "SEASON", "2", false, 2, 0, 0, ""))}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configTMDBKey: ""})
+	r.tmdbBase = fakeTMDB(t, http.StatusUnauthorized, nil).URL // must not be asked
+	d := seasonRequest(2)
+	d.ExternalIds["tmdb"] = "1973"
+	d.IsAnime = true
+	resp, err := fulfill(t, r, conn, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls(fake.collectionCalls); got != "s2:true" {
+		t.Fatalf("collection calls = %q", got)
+	}
+	if msg := targetMessage(t, resp); !strings.Contains(msg, "TMDB") {
+		t.Fatalf("anime without a token should say its seasons were not matched: %q", msg)
+	}
+}
+
+// Tags can drive Scryer's maintenance rules, so a title Scryer already had is
+// tagged only when the admin allows it, even when the request changed it: a
+// rule on silo-request must not reach the admin's own series because a user
+// asked for its new season.
+func TestChangedExistingTitleIsTaggedOnlyWhenAllowed(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  map[string]any
+		want string
+	}{
+		"not allowed": {map[string]any{configTagTitles: true}, ""},
+		"allowed":     {map[string]any{configTagTitles: true, configTagExistingTitles: true}, "silo-request,silo-user-ana"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeScryer{reused: true, title: seasonTitle(season("s1", "SEASON", "1", true, 2, 0, 0, ""))}
+			r, conn := newTestRouter(t, fake)
+			withConfig(t, conn, tc.cfg)
+			d := seasonRequest(1)
+			d.RequesterUsername = "ana"
+			if _, err := fulfill(t, r, conn, d); err != nil {
+				t.Fatal(err)
+			}
+			if calls(fake.episodeCalls) != "s1e1,s1e2" || calls(fake.tagged) != tc.want {
+				t.Fatalf("episodes %v, tagged %q, want %q", fake.episodeCalls, calls(fake.tagged), tc.want)
+			}
+		})
+	}
+}
+
+// The lookup only prevents duplicates: if Scryer refuses it, the request goes
+// on as before the lookup existed (Scryer still matches within one library).
+func TestRefusedLookupStillAddsTheTitle(t *testing.T) {
+	fake := &fakeScryer{findErr: "not allowed"}
+	r, conn := newTestRouter(t, fake)
+	resp, err := fulfill(t, r, conn, &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Alien", ExternalIds: map[string]string{"tmdb": "348"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fake.added == nil || resp.GetTargets()[0].GetStatus() != statusQueued {
+		t.Fatalf("added %v, targets %v", fake.added, resp.GetTargets())
+	}
+}
+
+// Silo gives Fulfill 60 seconds. The waits for a new title's seasons share one
+// budget, so a title Scryer never finishes loading ends in ErrNotLoaded (Silo
+// retries) well inside it, instead of three waits in a row running past it.
+func TestSeasonWaitsShareOneBudget(t *testing.T) {
+	defer func(p time.Duration, b time.Duration) { scryer.SeasonPoll, seasonWaitBudget = p, b }(scryer.SeasonPoll, seasonWaitBudget)
+	scryer.SeasonPoll = 20 * time.Millisecond // each wait alone: 10 x 20ms
+	seasonWaitBudget = 60 * time.Millisecond
+	title := seasonTitle(season("s1", "SEASON", "1", false, 2, 0, 0, ""))
+	title["metadataFetchedAt"] = nil
+	fake := &fakeScryer{title: title, hydrateAfter: 1000}
+	r, conn := newTestRouter(t, fake)
+	withConfig(t, conn, map[string]any{configSeriesSpecials: true})
+	r.tmdbBase = fakeTMDB(t, http.StatusOK, [][3]any{{1, "2022-01-09", 2}}).URL
+	d := seasonRequest(1)
+	d.ExternalIds["tmdb"] = "100"
+	start := time.Now()
+	_, err := fulfill(t, r, conn, d)
+	if !errors.Is(err, scryer.ErrNotLoaded) {
+		t.Fatalf("err = %v, want ErrNotLoaded", err)
+	}
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Fatalf("took %v: the waits did not share the budget", took)
 	}
 }

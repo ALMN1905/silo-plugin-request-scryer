@@ -121,6 +121,9 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 	}
 	var libraryNote string
+	if series && !whole && d.GetIsAnime() && tmdbKey(conn) == "" {
+		libraryNote = " Seasons not matched with TMDB (no TMDB token set); Silo's season numbers were used."
+	}
 	if choice := animeMovieLibrary(conn); choice != "" && isAnimeMovie(d) {
 		id, err := client.LibraryID(ctx, "MOVIE", choice)
 		switch {
@@ -129,7 +132,7 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrLibraryNotFound):
 			// The library was deleted, or Scryer refused to list libraries. The
 			// request still goes through, to the default movie library.
-			libraryNote = " The chosen anime movies library could not be used; the title went to the default movie library."
+			libraryNote += " The chosen anime movies library could not be used; the title went to the default movie library."
 		default:
 			// Scryer could not be reached: Silo retries the request.
 			return nil, err
@@ -161,7 +164,10 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		}
 		switch {
 		case errors.As(err, &gqlErr):
-			return failed("", "Scryer could not look the title up: "+gqlErr.Error()), nil
+			// The lookup only prevents duplicates across libraries: without it
+			// the title is added as before, and Scryer still matches it within
+			// the target library.
+			libraryNote += " Scryer did not let the plugin look the title up in its other libraries first."
 		case err != nil:
 			return nil, err
 		}
@@ -210,6 +216,11 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	// counts when the plugin had to switch something on.
 	changed := !added.Reused
 	hasFile := false
+	// Silo gives Fulfill 60 seconds; the waits for a new title's seasons share
+	// one budget well inside it, so running out ends in ErrNotLoaded (Silo
+	// retries) instead of Silo cutting the call off part way.
+	waitCtx, cancelWait := context.WithTimeout(ctx, seasonWaitBudget)
+	defer cancelWait()
 	var seasonNote string
 	switch {
 	case !series && added.Reused:
@@ -233,12 +244,13 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 			changed = true
 		}
 	case series && !whole:
-		mapped, err := matchSeasons(ctx, client, titleID, seasons, theirs, !added.Reused)
+		mapped, err := matchSeasons(waitCtx, client, titleID, seasons, theirs, !added.Reused)
 		var switched bool
 		var missing []int32
 		if err == nil {
-			switched, missing, err = client.MonitorSeasons(ctx, titleID, mapped, !added.Reused)
+			switched, missing, err = client.MonitorSeasons(waitCtx, titleID, mapped, !added.Reused)
 		}
+		err = budgetSpent(ctx, err)
 		switch {
 		case errors.As(err, &gqlErr), errors.Is(err, scryer.ErrSeasonNotFound):
 			return failed(titleID, "Scryer could not monitor the seasons: "+err.Error()), nil
@@ -257,7 +269,9 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	// them monitored only when the admin asks. Anime follow Scryer's own anime
 	// setting, and a title Scryer already had keeps its own.
 	if series && !d.GetIsAnime() && !added.Reused && monitorSeriesSpecials(conn) {
-		if err := client.MonitorSpecials(ctx, titleID); err != nil {
+		if err := client.MonitorSpecials(waitCtx, titleID); err != nil && !errors.Is(budgetSpent(ctx, err), scryer.ErrNotLoaded) {
+			// Out of time for the specials: the title is in place, so it is not
+			// worth a retry (which would see it as existing anyway).
 			if errors.As(err, &gqlErr) {
 				return failed(titleID, "Scryer could not monitor the specials: "+gqlErr.Error()), nil
 			}
@@ -266,10 +280,13 @@ func (r *Router) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	}
 
 	// Scryer ignores the tags of an addTitle that finds the title already in the
-	// library, so a title the plugin changed is tagged afterwards.
-	if added.Reused && changed && len(tags) > 0 {
+	// library, so a title the plugin changed is tagged afterwards, when the admin
+	// allows it: tags can drive Scryer's maintenance rules, and a rule on
+	// silo-request must not reach the admin's own series because a user asked for
+	// one of its seasons.
+	if added.Reused && changed && len(tags) > 0 && tagExistingTitles(conn) {
 		if err := client.UpdateTitleTags(ctx, titleID, tags); err != nil {
-			tagNote = " Not tagged: " + err.Error() + "."
+			tagNote = " Not tagged: " + shorten(err.Error(), 200) + "."
 		}
 	}
 
@@ -322,18 +339,19 @@ func monitorSeriesSpecials(conn *pluginv1.RouterConnection) bool {
 	return conn.GetConfig().GetFields()[configSeriesSpecials].GetBoolValue()
 }
 
-// configTMDBKey is the connection config key of the TMDB API key. Silo numbers
-// seasons as TMDB does, so a series request cannot be matched to Scryer's seasons
-// without it.
+// configTMDBKey is the connection config key of the TMDB Read Access Token.
+// Silo numbers seasons as TMDB does; Scryer can split or merge them (anime above
+// all), and the token lets the plugin match them. Without it Silo's numbers are
+// used as they are.
 const configTMDBKey = "tmdb_api_key"
 
-// tmdbKeyProblem says what is wrong with the TMDB key in the settings, or "". Only
-// the API Read Access Token is accepted: it reads and cannot change anything, as
-// the API key can.
+// tmdbKeyProblem says what is wrong with the TMDB key in the settings, or "". The
+// key is optional; when set, only the API Read Access Token is accepted: it reads
+// and cannot change anything, as the API key can.
 func tmdbKeyProblem(key string) string {
 	switch {
 	case key == "":
-		return "Set the TMDB API Read Access Token in the plugin settings: a series request needs it to match Silo's seasons to Scryer's."
+		return "" // optional: series then use Silo's season numbers as they are
 	case !tmdb.IsReadToken(key):
 		return "The TMDB key in the plugin settings must be the API Read Access Token (it starts with \"eyJ\"), not the API key."
 	}
@@ -353,10 +371,12 @@ type cachedSeasons struct {
 }
 
 // tmdbSeasonsOf reads the seasons of the requested series from TMDB; nil when
-// the request carries no TMDB id.
+// the request carries no TMDB id or no token is set.
 func (r *Router) tmdbSeasonsOf(ctx context.Context, conn *pluginv1.RouterConnection, d *pluginv1.RequestDescriptor) ([]seasonmap.Season, error) {
 	tmdbID := d.GetExternalIds()["tmdb"]
-	if tmdbID == "" {
+	if tmdbID == "" || tmdbKey(conn) == "" {
+		// No TMDB id, or no token: Silo's season numbers are used as they are,
+		// which is right whenever Scryer numbers the seasons as TMDB does.
 		return nil, nil
 	}
 	return r.tmdbSeasons(ctx, tmdbKey(conn), tmdbID)
@@ -384,8 +404,36 @@ func (r *Router) tmdbSeasons(ctx context.Context, key, tmdbID string) ([]seasonm
 	if err != nil {
 		return nil, err
 	}
-	r.tmdb.Store(tmdbID, cachedSeasons{seasons: seasons, until: r.now().Add(tmdbTTL)})
+	now := r.now()
+	r.tmdb.Range(func(k, v any) bool { // drop expired entries: the process lives long
+		if !now.Before(v.(cachedSeasons).until) {
+			r.tmdb.Delete(k)
+		}
+		return true
+	})
+	r.tmdb.Store(tmdbID, cachedSeasons{seasons: seasons, until: now.Add(tmdbTTL)})
 	return seasons, nil
+}
+
+// seasonWaitBudget is how long one Fulfill may wait for Scryer to load a new
+// title's seasons, across all its waits. Silo cuts Fulfill off at 60 seconds.
+var seasonWaitBudget = 30 * time.Second
+
+// budgetSpent turns the end of the season wait budget into ErrNotLoaded, which
+// Silo retries; the request's own context ending is passed on as it is.
+func budgetSpent(ctx context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return fmt.Errorf("%w (waited %s)", scryer.ErrNotLoaded, seasonWaitBudget)
+	}
+	return err
+}
+
+// configTagExistingTitles is the connection config key of the switch that also
+// tags titles Scryer already had, when a request changed them; absent means off.
+const configTagExistingTitles = "tag_existing_titles"
+
+func tagExistingTitles(conn *pluginv1.RouterConnection) bool {
+	return conn.GetConfig().GetFields()[configTagExistingTitles].GetBoolValue()
 }
 
 // configTagTitles is the connection config key of the switch that tags the
@@ -538,8 +586,8 @@ func (r *Router) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 	return resp, nil
 }
 
-// seasonsHaveFiles reports whether every requested season Scryer has got at
-// least one file. A season Scryer does not have (yet) is left out, as the
+// seasonsHaveFiles reports whether every requested season Scryer has got a file
+// for each of its monitored episodes. A season Scryer does not have (yet) is left out, as the
 // request leaves it out; with none of them in Scryer there is nothing to wait for.
 func seasonsHaveFiles(title *scryer.Title, seasons []int32) bool {
 	found := false
@@ -549,7 +597,13 @@ func seasonsHaveFiles(title *scryer.Title, seasons []int32) bool {
 			continue
 		}
 		found = true
-		if col := title.Collections[i]; col.EpisodesOwned == nil || *col.EpisodesOwned == 0 {
+		// Done when every monitored episode has a file: one file of a ten-episode
+		// season is not the season. A season with nothing owned is never done.
+		col := title.Collections[i]
+		if col.EpisodesOwned == nil || *col.EpisodesOwned == 0 {
+			return false
+		}
+		if col.EpisodesMonitored != nil && *col.EpisodesOwned < *col.EpisodesMonitored {
 			return false
 		}
 	}
@@ -688,8 +742,8 @@ func (r *Router) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 	return resp, nil
 }
 
-// Validate checks the TMDB key: it is required, and only the API Read Access
-// Token is accepted. The anime movies library is not checked here; one that has
+// Validate checks the TMDB key: it is optional, and when set only the API Read
+// Access Token is accepted. The anime movies library is not checked here; one that has
 // gone is handled when a request is fulfilled.
 func (r *Router) Validate(_ context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
 	resp := &pluginv1.ValidateResponse{}

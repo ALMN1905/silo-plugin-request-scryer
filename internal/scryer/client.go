@@ -335,7 +335,7 @@ func (c *Client) Title(ctx context.Context, id string) (*Title, error) {
 	var out struct {
 		Title *Title `json:"title"`
 	}
-	const q = `query SiloTitle($id: ID!) { title(id: $id) { id monitored mediaFiles { id } collections { collectionType collectionIndex monitored episodesOwned } downloadQueueItems(includeImportActivity: true) { displayState progressPercent sizeBytes remainingSeconds } } }`
+	const q = `query SiloTitle($id: ID!) { title(id: $id) { id monitored mediaFiles { id } collections { collectionType collectionIndex monitored episodesOwned episodesMonitored } downloadQueueItems(includeImportActivity: true) { displayState progressPercent sizeBytes remainingSeconds } } }`
 	if err := c.do(ctx, q, map[string]any{"id": id}, &out); err != nil {
 		return nil, err
 	}

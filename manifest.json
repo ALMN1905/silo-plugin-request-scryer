@@ -37,7 +37,7 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"},\"tag_existing_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
@@ -56,17 +56,32 @@
               },
               {
                 "key": "tmdb_api_key",
-                "label": "TMDB API key - Read Access Token",
-                "description": "The API key is REQUIRED for series and anime requests, and only the Read Access Token is accepted (it starts with \"eyJ\" and can't change anything on TMDB). Silo numbers seasons as TMDB does, and Scryer's seasons can differ (anime above all): with the key the plugin matches each requested season to Scryer's by air date and episode count.",
+                "label": "TMDB Read Access Token (optional)",
+                "description": "Recommended for anime. Silo numbers seasons as TMDB does, and Scryer can split or merge them differently (anime above all): with the token the plugin matches each requested season to Scryer's by air date and episode count. Without it, Silo's season numbers are used as they are, which suits most series. Only the API Read Access Token is accepted (it starts with \"eyJ\" and can't change anything on TMDB), not the API key.",
                 "control": "ADMIN_FORM_CONTROL_PASSWORD",
                 "secret": true
               },
               {
                 "key": "tag_titles",
                 "label": "Tag titles on Scryer",
-                "description": "Adds the tags \"silo-request\" and \"silo-user-<username>\" to every title the plugin adds or changes, so Silo requests can be filtered and managed together. A title Scryer already had is tagged only when a request monitored something in it. The user tag names the Silo account (shared by its profiles), using only letters, digits and dashes. The tags are created in Scryer when missing. The Scryer API key needs the permissions \"Manage titles\" and \"Manage catalog settings\".",
+                "description": "Adds the tags \"silo-request\" and \"silo-user-<username>\" to every title the plugin adds, so Silo requests can be filtered and managed together. The user tag names the Silo account (shared by its profiles), using only letters, digits and dashes. The tags are created in Scryer when missing. The Scryer API key needs the permissions \"Manage titles\" and \"Manage catalog settings\".",
                 "control": "ADMIN_FORM_CONTROL_SWITCH",
                 "default_value": false
+              },
+              {
+                "key": "tag_existing_titles",
+                "label": "Also tag titles Scryer already had",
+                "description": "OFF: only titles the plugin adds are tagged. ON: a title Scryer already had is tagged too when a request monitored something in it. Tags can drive Scryer's maintenance rules, so turn this on only if a rule on these tags should also reach older titles (a user asking for a new season of your series would bring the whole series under the rule).",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false,
+                "show_when": [
+                  {
+                    "field": "tag_titles",
+                    "equals": [
+                      "true"
+                    ]
+                  }
+                ]
               }
             ]
           }
