@@ -37,56 +37,41 @@
         {
           "key": "connection",
           "title": "Scryer server",
-          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"series_monitor_type\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"},\"tag_existing_titles\":{\"type\":\"boolean\"}}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"anime_movies_library\":{\"type\":\"string\"},\"monitor_series_specials\":{\"type\":\"boolean\"},\"tmdb_api_key\":{\"type\":\"string\"},\"tag_titles\":{\"type\":\"boolean\"},\"tag_existing_titles\":{\"type\":\"boolean\"}}}",
           "admin_form": {
             "fields": [
               {
                 "key": "anime_movies_library",
                 "label": "Anime movies library",
-                "description": "Scryer movie library that receives anime movies. Choose Scryer's default movie library to leave them there. Only libraries the API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again. Scryer matches existing titles within one library, so an anime movie already in another movie library is added again here.",
+                "description": "Choose another library than the one marked \"(Scryer's default movie library)\" to change the library that receives anime movies. Only libraries the Scryer API key can add titles to are listed. If the chosen library is later deleted, anime movies go to the default movie library again.",
                 "control": "ADMIN_FORM_CONTROL_SELECT",
                 "dynamic_options": true
               },
               {
-                "key": "series_monitor_type",
-                "label": "Series and anime monitoring",
-                "description": "Which episodes Scryer monitors (and so downloads) when a series or anime is requested. A choice other than Leave to Scryer also applies when the series is already in Scryer, replacing its monitoring there.",
-                "control": "ADMIN_FORM_CONTROL_SELECT",
-                "default_value": "DEFAULT",
-                "options": [
-                  {
-                    "value": "DEFAULT",
-                    "label": "Leave to Scryer",
-                    "description": "Send no monitoring choice. A new series has every episode monitored; one already in Scryer keeps its monitoring."
-                  },
-                  {
-                    "value": "ALL_EPISODES",
-                    "label": "All episodes",
-                    "description": "Every episode, including already aired ones."
-                  },
-                  {
-                    "value": "MISSING_AND_FUTURE_EPISODES",
-                    "label": "Missing and future episodes",
-                    "description": "Everything Scryer has no file for, plus future episodes."
-                  },
-                  {
-                    "value": "FUTURE_EPISODES",
-                    "label": "Future episodes only",
-                    "description": "Episodes that have not aired yet. No backlog download."
-                  }
-                ]
+                "key": "monitor_series_specials",
+                "label": "Monitor specials of new series",
+                "description": "Scryer has no setting for the specials of series: they are never monitored, unlike anime, which follow the anime specials setting in Scryer. With \"Monitor specials of new series\" on, a new series requested from Silo gets its specials monitored (and so downloaded). Off (default): Scryer decides, so they are not. Anime always follow Scryer, and titles Scryer already has keep theirs. Silo can't request specials, so this is the admin's decision.",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false
+              },
+              {
+                "key": "tmdb_api_key",
+                "label": "TMDB Read Access Token (optional)",
+                "description": "Recommended for anime. Silo numbers seasons as TMDB does, and Scryer can split or merge them differently (anime above all): with the token the plugin matches each requested season to Scryer's by air date and episode count. Without it, Silo's season numbers are used as they are, which suits most series. Only the API Read Access Token is accepted (it starts with \"eyJ\" and can't change anything on TMDB), not the API key.",
+                "control": "ADMIN_FORM_CONTROL_PASSWORD",
+                "secret": true
               },
               {
                 "key": "tag_titles",
-                "label": "Tag titles with the requester",
-                "description": "Adds the tags silo-request and silo-user-<username> to every title the plugin adds, so Silo requests can be filtered and managed together. The user tag names the Silo account (shared by its profiles), using only letters, digits and dashes. Missing tags are created in Scryer; one it will not create is left off and the others are still used.",
+                "label": "Tag titles on Scryer",
+                "description": "Adds the tags \"silo-request\" and \"silo-user-<username>\" to every title the plugin adds, so Silo requests can be filtered and managed together. The user tag names the Silo account (shared by its profiles), using only letters, digits and dashes. The tags are created in Scryer when missing. The Scryer API key needs the permissions \"Manage titles\" and \"Manage catalog settings\".",
                 "control": "ADMIN_FORM_CONTROL_SWITCH",
                 "default_value": false
               },
               {
                 "key": "tag_existing_titles",
                 "label": "Also tag titles Scryer already had",
-                "description": "OFF: only titles the plugin newly adds are tagged. ON: a title Scryer already had in the library also gets the tags when it is requested again. Tags can drive Scryer's maintenance rules, so turn this on only if a rule on these tags should also apply to older titles.",
+                "description": "OFF: only titles the plugin adds are tagged. ON: a title Scryer already had is tagged too when a request monitored something in it. Tags can drive Scryer's maintenance rules, so turn this on only if a rule on these tags should also reach older titles (a user asking for a new season of your series would bring the whole series under the rule).",
                 "control": "ADMIN_FORM_CONTROL_SWITCH",
                 "default_value": false,
                 "show_when": [
@@ -103,6 +88,7 @@
         }
       ],
       "request_router": {
+        "supports_seasons": true,
         "reports_download_progress": true,
         "wording": {
           "step": "Scryer",
